@@ -145,6 +145,9 @@ async def serve_page(page: str):
         return RedirectResponse(url="/dashboard.html", status_code=301)
     return FileResponse(f"pages/{safe}.html")
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
