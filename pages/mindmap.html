@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SocialProof — Explore</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pages/styles.css">
+</head>
+<body class="mindmap-page">
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">Social<span>Proof</span></a>
+    <button class="sidebar-close-btn" onclick="toggleSidebar()" title="Close sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <nav class="sidebar-nav">
+    <a href="index.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      Practice
+    </a>
+    <div class="nav-group" id="nav-group-lessons">
+      <button class="nav-group-toggle" id="nav-lessons-toggle" onclick="toggleNavGroup('lessons')">
+        <span class="toggle-left">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Lessons
+        </span>
+      </button>
+      <div class="nav-sub" id="nav-sub-lessons">
+        <a href="lessons.html" class="nav-sub-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Lessons &amp; Quiz
+        </a>
+        <a href="lessons.html#prebunking" class="nav-sub-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 0-2-2V9m0 0h18"/></svg>
+          Prebunking Lab
+        </a>
+      </div>
+    </div>
+    <a href="mindmap.html" class="nav-item active">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+      Explore
+    </a>
+    <a href="dashboard.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      Dashboard
+    </a>
+  </nav>
+  <div class="sidebar-section">Age Mode</div>
+  <div class="age-mode-grid">
+    <button class="age-pill" id="age-youth"  onclick="setAgeMode('youth')">Youth</button>
+    <button class="age-pill" id="age-adult" onclick="setAgeMode('adult')">Adult</button>
+    <button class="age-pill" id="age-older" onclick="setAgeMode('older')">Seniors</button>
+  </div>
+  <div class="sidebar-footer">
+    <a href="login.html" class="nav-item" id="sidebar-login-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+        <polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
+      </svg>
+      Login
+    </a>
+  </div>
+</aside>
+<div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+<button class="burger-btn" id="burger-btn" onclick="toggleSidebar()" title="Open menu">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/>
+    <line x1="3" y1="12" x2="21" y2="12"/>
+    <line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<div id="nav">
+  <div id="nav-logo"><span>Social</span>Proof &mdash; <span style="color:var(--violet)">Explore</span></div>
+  <div style="display:flex;gap:6px;margin-left:auto;align-items:center;">
+    <button onclick="zoomToFit()" style="background:none;border:1px solid var(--border2);border-radius:6px;color:var(--muted);font-family:'Space Mono',monospace;font-size:10px;padding:4px 10px;cursor:pointer;letter-spacing:0.04em;transition:all 0.2s;" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">&#x2316; recenter</button>
+    <div id="nav-hint">drag to wander &nbsp;&middot;&nbsp; click to discover &nbsp;&middot;&nbsp; <kbd>esc</kbd> to close &nbsp;&middot;&nbsp; <kbd>H</kbd> to recenter</div>
+  </div>
+</div>
+
+<div id="canvas">
+  <div id="map-root">
+    <svg id="connections" xmlns="http://www.w3.org/2000/svg"></svg>
+    <!-- nodes injected by JS -->
+  </div>
+</div>
+
+<div id="panel">
+  <div id="panel-head">
+    <div id="panel-icon">📰</div>
+    <div id="panel-title">Viral Post</div>
+    <button id="panel-close">✕</button>
+  </div>
+  <div id="panel-body">
+    <!-- content injected by JS -->
+  </div>
+</div>
+
+<div id="progress-strip">
+  <div class="progress-dots" id="progress-dots"></div>
+  <span id="progress-text">0 discovered</span>
+</div>
+
+<div id="toast"></div>
+<script src="/pages/script.js" defer></script>
+<script src="/pages/mindmap.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SocialProof — Login</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pages/styles.css">
+</head>
+<body class="page-login">
+<div class="grid-bg"></div>
+<div class="glow-blob"></div>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">Social<span>Proof</span></a>
+    <button class="sidebar-close-btn" onclick="toggleSidebar()" title="Close sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <nav class="sidebar-nav">
+    <a href="index.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      Evaluate
+    </a>
+    <div class="nav-group" id="nav-group-lessons">
+      <button class="nav-group-toggle" id="nav-lessons-toggle" onclick="toggleNavGroup('lessons')">
+        <span class="toggle-left">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Lessons
+        </span>
+      </button>
+      <div class="nav-sub" id="nav-sub-lessons">
+        <a href="lessons.html" class="nav-sub-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Lessons &amp; Quiz
+        </a>
+        <a href="lessons.html#prebunking" class="nav-sub-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 0-2-2V9m0 0h18"/></svg>
+          Prebunking Lab
+        </a>
+      </div>
+    </div>
+    <a href="mindmap.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+      Mind Map
+    </a>
+    <a href="dashboard.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      Dashboard
+    </a>
+  </nav>
+
+  <div class="sidebar-section">Age Mode</div>
+  <div class="age-mode-grid">
+    <button class="age-pill" id="age-youth"  onclick="setAgeMode('youth')">Youth</button>
+    <button class="age-pill" id="age-adult" onclick="setAgeMode('adult')">Adult</button>
+    <button class="age-pill" id="age-older" onclick="setAgeMode('older')">Seniors</button>
+  </div>
+  <div class="sidebar-footer">
+    <a href="login.html" class="nav-item active" id="sidebar-login-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+        <polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
+      </svg>
+      Login
+    </a>
+  </div>
+</aside>
+<div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+<button class="burger-btn" id="burger-btn" onclick="toggleSidebar()" title="Open menu">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<div class="main" id="main">
+<div class="app">
+
+<div class="auth-wrap">
+
+  <!-- Left: pitch -->
+  <div class="auth-pitch">
+    <div class="pitch-label">Join SocialProof</div>
+    <h1 class="pitch-heading">Think <em>critically.</em><br>Share responsibly.</h1>
+    <p class="pitch-sub">Create an account to unlock your full evaluation history, earn MIL skill badges, and participate in community fact-checking reviews.</p>
+
+    <div class="pitch-features">
+      <div class="pitch-feature">
+        <div class="pf-icon">📈</div>
+        <div class="pf-text">
+          <strong>Track Your Progress</strong>
+          See how your media literacy score improves over time with every evaluation.
+        </div>
+      </div>
+      <div class="pitch-feature">
+        <div class="pf-icon">💬</div>
+        <div class="pf-text">
+          <strong>Community Reviews</strong>
+          Share your analysis and read how others evaluated the same content.
+        </div>
+      </div>
+      <div class="pitch-feature">
+        <div class="pf-icon">🎓</div>
+        <div class="pf-text">
+          <strong>Adaptive Learning</strong>
+          Lessons are personalized based on where your evaluations tend to go wrong.
+        </div>
+      </div>
+      <div class="pitch-feature">
+        <div class="pf-icon">🔒</div>
+        <div class="pf-text">
+          <strong>Anonymous Mode Always Available</strong>
+          You can still evaluate content without an account. Login is optional.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: form -->
+  <div class="auth-card">
+
+    <!-- Tabs -->
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="tab-login" onclick="switchTab('login')">Log In</button>
+      <button class="auth-tab" id="tab-register" onclick="switchTab('register')">Register</button>
+    </div>
+
+    <!-- SUCCESS STATE -->
+    <div class="success-state" id="success-state">
+      <div class="success-icon">✅</div>
+      <div class="success-title" id="success-title">Welcome back!</div>
+      <div class="success-sub" id="success-sub">Redirecting to your dashboard…</div>
+    </div>
+
+    <!-- LOGIN FORM -->
+    <div id="form-login">
+      <div class="form-group">
+        <label class="form-label">Username or Email</label>
+        <input class="form-input" id="login-identifier" type="text" placeholder="your_username or email@example.com" autocomplete="username">
+        <div class="form-error" id="err-login-identifier">Please enter your username or email.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <div class="input-wrap">
+          <input class="form-input" id="login-password" type="password" placeholder="••••••••" autocomplete="current-password">
+          <button class="toggle-pw" type="button" onclick="togglePw('login-password', this)" aria-label="Show password"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        </div>
+        <span class="forgot-link" onclick="showForgot()">Forgot password?</span>
+        <div class="form-error" id="err-login-password">Please enter your password.</div>
+      </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="remember-me">
+        <label for="remember-me">Remember me for 30 days</label>
+      </div>
+
+      <button id="btn-login" class="btn btn-primary" onclick="submitLogin()">Log In →</button>
+      <div class="anon-strip" style="margin-top:1rem;">
+        Don't have an account? <a onclick="switchTab('register')" style="cursor:pointer;">Register free</a>
+      </div>
+    </div>
+
+    <!-- REGISTER FORM -->
+    <div id="form-register" style="display:none;">
+      <div class="form-group">
+        <label class="form-label">Username</label>
+        <input class="form-input" id="reg-username" type="text" placeholder="choose a username" autocomplete="username" oninput="validateUsername()">
+        <div class="form-error" id="err-reg-username">Username must be 3–50 characters, letters/numbers/underscores only.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Email Address</label>
+        <input class="form-input" id="reg-email" type="email" placeholder="you@example.com" autocomplete="email" oninput="validateEmail()">
+        <div class="form-error" id="err-reg-email">Please enter a valid email address.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <div class="input-wrap">
+          <input class="form-input" id="reg-password" type="password" placeholder="at least 8 characters" autocomplete="new-password" oninput="checkStrength()">
+          <button class="toggle-pw" type="button" onclick="togglePw('reg-password', this)" aria-label="Show password"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        </div>
+        <div class="pw-strength" id="pw-strength">
+          <div class="pw-bars">
+            <div class="pw-bar" id="bar1"></div>
+            <div class="pw-bar" id="bar2"></div>
+            <div class="pw-bar" id="bar3"></div>
+            <div class="pw-bar" id="bar4"></div>
+          </div>
+          <div class="pw-label" id="pw-label">Enter a password</div>
+        </div>
+        <div style="font-family:'DM Mono',monospace;font-size:.66rem;color:var(--muted);margin-top:.35rem;line-height:1.6;">
+          Must be 8+ chars with at least one uppercase, one number, and one special character (!@#$%^&amp;*…)
+        </div>
+        <div class="form-error" id="err-reg-password">Password must be at least 8 characters with uppercase, number &amp; special character.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Confirm Password</label>
+        <div class="input-wrap">
+          <input class="form-input" id="reg-confirm" type="password" placeholder="repeat your password" autocomplete="new-password" oninput="validateConfirm()">
+          <button class="toggle-pw" type="button" onclick="togglePw('reg-confirm', this)" aria-label="Show password"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        </div>
+        <div class="form-error" id="err-reg-confirm">Passwords do not match.</div>
+      </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="accept-anon">
+        <label for="accept-anon">I understand that evaluations submitted before login were anonymous and cannot be linked to my account</label>
+      </div>
+
+      <button id="btn-register" class="btn btn-primary" onclick="submitRegister()">Create Account →</button>
+      <div class="anon-strip" style="margin-top:1rem;">
+        Already have an account? <a onclick="switchTab('login')" style="cursor:pointer;">Log in</a>
+      </div>
+    </div>
+
+    <!-- FORGOT PASSWORD -->
+    <div id="form-forgot" style="display:none;">
+      <div style="margin-bottom:1.2rem;">
+        <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;margin-bottom:.4rem;">Reset Password</div>
+        <div style="font-size:.85rem;color:var(--muted);line-height:1.6;">Enter your email and we'll send you a link to reset your password.</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Email Address</label>
+        <input class="form-input" id="forgot-email" type="email" placeholder="you@example.com">
+        <div class="form-error" id="err-forgot-email">Please enter a valid email address.</div>
+      </div>
+      <button class="btn btn-primary" onclick="submitForgot()">Send Reset Link →</button>
+      <button class="btn btn-ghost" onclick="switchTab('login')">← Back to Login</button>
+    </div>
+
+    <div class="anon-strip" style="margin-top:1.2rem;padding-top:1rem;border-top:1px solid var(--border);">
+      🔒 Prefer to stay anonymous? <a href="index.html">Evaluate without logging in →</a>
+    </div>
+
+  </div><!-- /auth-card -->
+</div><!-- /auth-wrap -->
+</div><!-- /app -->
+</div><!-- /.main -->
+<script src="/pages/script.js" defer></script>
+<script src="/pages/login.js" defer></script>
+</body>
+</html>

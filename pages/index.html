@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SocialProof — Practice</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pages/styles.css">
+</head>
+<body data-page="index">
+
+<!-- Restore banner: shown when a previous result is reloaded from localStorage -->
+
+<div class="grid-bg"></div>
+
+<!-- ══ SIDEBAR ═══════════════════════════════════════════════ -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">Social<span>Proof</span></a>
+    <button class="sidebar-close-btn" onclick="toggleSidebar()" title="Close sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M18 6L6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <nav class="sidebar-nav">
+    <a href="index.html" class="nav-item active">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      Practice
+    </a>
+    <div class="nav-group" id="nav-group-lessons">
+      <button class="nav-group-toggle" id="nav-lessons-toggle" onclick="toggleNavGroup('lessons')">
+        <span class="toggle-left">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Lessons
+        </span>
+      </button>
+      <div class="nav-sub" id="nav-sub-lessons">
+        <a href="lessons.html" class="nav-sub-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Lessons &amp; Quiz
+        </a>
+        <a href="lessons.html#prebunking" class="nav-sub-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 0-2-2V9m0 0h18"/></svg>
+          Prebunking Lab
+        </a>
+      </div>
+    </div>
+    <a href="mindmap.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+      Explore
+    </a>
+    <a href="dashboard.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      Dashboard
+    </a>
+  </nav>
+  <div class="sidebar-section">Age Mode</div>
+  <div class="age-mode-grid">
+    <button class="age-pill" id="age-youth"  onclick="setAgeMode('youth')">Youth</button>
+    <button class="age-pill" id="age-adult" onclick="setAgeMode('adult')">Adult</button>
+    <button class="age-pill" id="age-older" onclick="setAgeMode('older')">Seniors</button>
+  </div>
+  <div class="sidebar-footer">
+    <a href="login.html" class="nav-item" id="sidebar-login-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+        <polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
+      </svg>
+      Login
+    </a>
+  </div>
+</aside>
+<div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+<button class="burger-btn" id="burger-btn" onclick="toggleSidebar()" title="Open menu">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/>
+    <line x1="3" y1="12" x2="21" y2="12"/>
+    <line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<!-- ══ MAIN CONTENT ══════════════════════════════════════════ -->
+<div class="main" id="main">
+<div class="app">
+
+<!-- ── Topbar ─────────────────────────────────────────────── -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div>
+      <div class="topbar-title" id="page-title">Review Content</div>
+      <div class="topbar-sub" id="page-sub">CHECK · THINK · DECIDE</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── PHASE 1: Content Input ─────────────────────────── ---->
+<div id="phase-input">
+  <div class="section-label">Step 1 <span>Content Input</span></div>
+  <h2 id="h2-input">Paste text you want to review</h2>
+
+  <div class="card">
+    <div class="input-tabs">
+      <button class="tab-btn active" onclick="setTab(this,'text')">✍ Text</button>
+      <button class="tab-btn" onclick="setTab(this,'url')">🔗 URL</button>
+      <button class="tab-btn" onclick="setTab(this,'image')">🖼 Image</button>
+      <button class="tab-btn" onclick="setTab(this,'file')">📄 File</button>
+    </div>
+    <textarea id="content-input" placeholder="Paste the social media post, news headline, or any content you want to fact-check…"></textarea>
+
+    <div id="image-upload-area" style="display:none;">
+      <label for="image-file-input" id="image-drop-label" style="
+        display:flex;flex-direction:column;align-items:center;justify-content:center;
+        border:2px dashed var(--border);border-radius:10px;padding:2rem 1rem;
+        cursor:pointer;gap:.75rem;transition:border-color .2s,background .2s;
+        background:var(--surface);min-height:140px;
+      ">
+        <span style="font-size:2.2rem;">🖼</span>
+        <span style="font-weight:600;color:var(--text);">Click to upload an image</span>
+        <span class="text-muted" style="font-size:.85rem;">JPG, PNG, WEBP — max 10 MB</span>
+      </label>
+      <input id="image-file-input" type="file" accept="image/*" style="display:none;" onchange="handleImageUpload(this)">
+      <div id="image-preview-wrap" style="display:none;margin-top:.75rem;text-align:center;">
+        <img id="image-preview" src="" alt="preview" style="max-height:160px;max-width:100%;border-radius:8px;object-fit:contain;border:1px solid var(--border);">
+        <div id="image-filename" class="text-muted" style="font-size:.8rem;margin-top:.4rem;"></div>
+        <button class="btn" style="margin-top:.5rem;font-size:.8rem;padding:.3rem .8rem;" onclick="clearImageUpload()">✕ Remove</button>
+      </div>
+    </div>
+
+    <!-- File (PDF/DOCX) upload area -->
+    <div id="file-upload-area" style="display:none;">
+      <label for="file-file-input" id="file-drop-label" style="
+        display:flex;flex-direction:column;align-items:center;justify-content:center;
+        border:2px dashed var(--border);border-radius:10px;padding:2rem 1rem;
+        cursor:pointer;gap:.75rem;transition:border-color .2s,background .2s;
+        background:var(--surface);min-height:140px;
+      ">
+        <span style="font-size:2.2rem;">📄</span>
+        <span style="font-weight:600;color:var(--text);">Click to upload a file</span>
+        <span class="text-muted" style="font-size:.85rem;">PDF only — max 10 MB</span>
+      </label>
+      <input id="file-file-input" type="file" accept=".pdf,.docx,.pptx,.html,.htm,.txt,.json" style="display:none;" onchange="handleFileUpload(this)">
+      <div id="file-preview-wrap" style="display:none;margin-top:.75rem;">
+        <div style="display:flex;align-items:center;gap:.75rem;padding:.75rem 1rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);">
+          <span style="font-size:1.5rem;">📄</span>
+          <div style="flex:1;min-width:0;">
+            <div id="file-filename" style="font-weight:500;color:var(--text);font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div id="file-filesize" class="text-muted" style="font-size:.8rem;margin-top:.1rem;"></div>
+          </div>
+          <button class="btn" style="font-size:.8rem;padding:.3rem .8rem;flex-shrink:0;" onclick="clearFileUpload()">✕ Remove</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:1rem;">
+      <span class="text-muted" id="char-count">0 characters</span>
+      <button class="btn btn-primary" id="begin-btn" onclick="startEvaluation()">
+        Begin Evaluation →
+      </button>
+    </div>
+  </div>
+
+  <p class="text-muted" style="text-align:center;margin-top:1rem;">
+    🔒 Your input is processed anonymously unless you're logged in.
+  </p>
+</div>
+
+<!-- ── PHASE 2: User Evaluation ────────────────────────── ---->
+<div id="phase-eval" style="display:none;">
+  <div class="section-label">Step 2 <span>Your Evaluation</span></div>
+  <h2>Review the content yourself first</h2>
+  <p class="text-muted" style="margin-bottom:1.5rem;">Complete these steps before seeing the system's analysis. This is how you build media literacy skills.</p>
+
+  <div class="progress-bar"><div class="progress-fill" id="eval-progress" style="width:0%"></div></div>
+
+  <!-- Step-by-step tracker (dynamically populated) -->
+  <div id="view-stepbystep">
+    <div class="steps" id="eval-steps-tracker">
+      <!-- Rendered by renderEvalSteps() -->
+    </div>
+  </div>
+
+  <!-- Dynamic eval steps container -->
+  <div id="eval-steps-container">
+    <!-- Rendered by renderEvalSteps() -->
+  </div>
+
+</div>
+
+<!-- ── PHASE 3: Loading ────────────────────────────────── ---->
+<div id="phase-loading" style="display:none;">
+  <div class="loader">
+    <div class="spinner"></div>
+    <div class="loader-text" id="loading-text">Analyzing content…</div>
+  </div>
+</div>
+
+<!-- ── PHASE: No Claims Detected ──────────────────────── ---->
+<div id="phase-no-claims" style="display:none;">
+  <div class="section-label">No Claims Detected</div>
+  <h2>We couldn't find a specific factual claim</h2>
+  <p class="text-muted" style="margin-bottom:1.5rem;">
+    The system didn't detect a verifiable factual claim in the content.
+    If you believe there <em>is</em> a claim being made, type it below and we'll check it.
+  </p>
+  <div class="card" id="no-claims-input-card">
+    <div class="question">💬 What do you think the claim is?</div>
+    <textarea id="no-claims-claim-input" placeholder="Type the factual claim you think this content is making…" style="min-height:80px;width:100%;box-sizing:border-box;"></textarea>
+    <div class="hint">💡 A claim is a statement presented as fact that can be verified. Example: "Coffee consumption reduces heart disease risk by 20%."</div>
+    <div style="display:flex;gap:1rem;margin-top:1rem;justify-content:flex-end;">
+      <button class="btn btn-ghost" onclick="newEval()">← Start Over</button>
+      <button class="btn btn-primary" id="validate-claim-btn" onclick="submitNoClaimsInput()">Check this claim →</button>
+    </div>
+  </div>
+  <div class="card" id="no-claims-validating" style="display:none;text-align:center;padding:2rem;">
+    <div class="spinner" style="margin:0 auto 1rem;"></div>
+    <div class="text-muted">Checking if this is a verifiable claim…</div>
+  </div>
+  <div class="card" id="no-claims-warning" style="display:none;border:1px solid var(--yellow);">
+    <div style="font-size:1.1rem;font-weight:600;margin-bottom:.5rem;">⚠️ This might not be a verifiable claim</div>
+    <div id="no-claims-warning-reason" class="text-muted" style="margin-bottom:1.25rem;line-height:1.5;"></div>
+    <div style="display:flex;gap:1rem;justify-content:flex-end;">
+      <button class="btn btn-ghost" onclick="retryClaimInput()">← Try again</button>
+      <button class="btn btn-primary" onclick="forceSubmitUserClaim()">Verify anyway →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── PHASE 4: Results ───────────────────────────────── ---->
+<div id="phase-results" style="display:none;">
+
+  <div class="section-label">Analysis Complete</div>
+
+  <!-- hidden elements kept for JS compatibility -->
+  <div style="display:none;" id="sys-label"></div>
+  <div style="display:none;" id="sys-explanation"></div>
+  <div style="display:none;" id="explanation-source"></div>
+  <div style="display:none;" id="eq-coverage"></div>
+  <div style="display:none;" id="eq-mode"></div>
+  <div style="display:none;" id="eq-partial"></div>
+  <div style="display:none;" id="eq-warning"></div>
+  <div style="display:none;" id="feedback-area"></div>
+  <div style="display:none;" id="lessons-area"></div>
+  <div style="display:none;" id="comp-user"></div>
+  <div style="display:none;" id="comp-user-conf"></div>
+
+  <!-- annotation elements kept as hidden stubs for JS compatibility -->
+  <div id="section-annotation" style="display:none;"></div>
+  <div id="annotated-text" style="display:none;"></div>
+  <div id="ann-claim-summary" style="display:none;"></div>
+  <div id="ann-claim-list" style="display:none;"></div>
+  <span id="ann-counts" style="display:none;"></span>
+  <div id="ann-tip" style="display:none;"><div id="ann-tip-type"></div><div id="ann-tip-desc"></div></div>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 1: USER RESULT                                      -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <div id="section-user-result" style="margin-bottom:2rem;">
+    <div class="section-label">📋 User Result</div>
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;">
+      <div id="ur-loading" style="color:var(--muted);font-size:.88rem;display:flex;align-items:center;gap:.6rem;">
+        <span class="loader-dot"></span> Generating your assessment…
+      </div>
+      <div id="ur-content" style="display:none;">
+        <div style="font-weight:600;margin-bottom:.85rem;font-size:.95rem;">Here's how you did across the 8 steps:</div>
+        <div id="ur-steps-recap" style="display:flex;flex-direction:column;gap:.5rem;margin-bottom:1.25rem;"></div>
+        <div id="ur-skipped-block" style="display:none;margin-top:1rem;padding:.9rem 1rem;background:rgba(251,146,60,.07);border:1px solid rgba(251,146,60,.25);border-radius:10px;">
+          <div style="font-weight:600;color:var(--orange);margin-bottom:.5rem;font-size:.88rem;">⬜ Steps You Skipped</div>
+          <div id="ur-skipped-list" style="font-size:.85rem;color:var(--text);line-height:1.6;"></div>
+        </div>
+        <div id="ur-unsure-block" style="display:none;margin-top:.75rem;padding:.9rem 1rem;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.25);border-radius:10px;">
+          <div style="font-weight:600;color:var(--yellow);margin-bottom:.5rem;font-size:.88rem;">🤔 Steps You Were Unsure About</div>
+          <div id="ur-unsure-list" style="font-size:.85rem;color:var(--text);line-height:1.6;"></div>
+        </div>
+        <div id="ur-ai-summary" style="margin-top:1.1rem;padding:1rem 1.1rem;background:var(--surface);border-radius:10px;border-left:3px solid var(--accent);font-size:.88rem;line-height:1.7;color:var(--text);"></div>
+        <div id="ur-lesson-suggestions" style="margin-top:1.1rem;display:flex;flex-direction:column;gap:.6rem;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 2: CONTENT RETRIEVAL                                -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <div id="section-content-retrieval" style="margin-bottom:2rem;">
+    <div class="section-label">🔍 Content Retrieval</div>
+    <p style="color:var(--muted);font-size:.85rem;margin-bottom:1rem;">What our system found from the corpus and online sources about this claim.</p>
+
+    <!-- Evidence from the original submission -->
+    <div id="evidence-submission-wrap" style="margin-bottom:1.25rem;">
+      <div style="font-family:'DM Mono',monospace;font-size:.65rem;color:var(--muted);letter-spacing:.08em;margin-bottom:.6rem;">EVIDENCE FROM WHAT WE FOUND FROM YOUR SUBMISSION</div>
+      <div class="evidence-list" id="evidence-submission-list"></div>
+    </div>
+
+    <!-- Evidence from the user-typed claim (only shown when applicable) -->
+    <div id="evidence-claim-wrap" style="display:none;margin-bottom:1.25rem;">
+      <div style="font-family:'DM Mono',monospace;font-size:.65rem;color:var(--muted);letter-spacing:.08em;margin-bottom:.6rem;">EVIDENCE FROM WHAT WE FOUND FROM WHAT YOU THINK THE CLAIM IS</div>
+      <div class="evidence-list" id="evidence-claim-list"></div>
+    </div>
+
+    <!-- compat alias kept for any old JS references -->
+    <div id="evidence-list" style="display:none;"></div>
+
+
+
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.25rem;">
+      <div style="font-weight:600;font-size:.9rem;margin-bottom:.85rem;color:var(--text);">🌐 Explore More</div>
+      <div id="cr-explore-loading" style="color:var(--muted);font-size:.85rem;display:flex;align-items:center;gap:.5rem;">
+        <span class="loader-dot"></span> Finding related sources…
+      </div>
+      <div id="cr-explore-content" style="display:none;">
+        <div id="r3-links"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 3: USER INPUT (Stance + Reasoning)                  -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <div id="section-user-input" style="margin-bottom:2rem;">
+    <div class="section-label">✍️ Your Assessment</div>
+
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.25rem;margin-bottom:1rem;">
+      <p style="color:var(--muted);font-size:.85rem;margin-bottom:1rem;">Take a moment to think before deciding what you believe.</p>
+      <div id="r4-prompts" style="display:flex;flex-direction:column;gap:.85rem;"></div>
+    </div>
+
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.25rem;margin-bottom:1rem;">
+      <p style="font-weight:600;margin-bottom:1rem;">Based on what you've seen, what's your verdict on this claim?</p>
+      <div style="display:flex;flex-direction:column;gap:.65rem;" id="r5-options">
+        <label class="option-label r5-option" data-val="supported">
+          <input type="radio" name="user_position" value="supported">
+          ✅ <strong>Supported</strong> — The evidence backs this claim
+        </label>
+        <label class="option-label r5-option" data-val="unsupported">
+          <input type="radio" name="user_position" value="unsupported">
+          ❌ <strong>Unsupported</strong> — The evidence contradicts or doesn't back this claim
+        </label>
+        <label class="option-label r5-option" data-val="uncertain">
+          <input type="radio" name="user_position" value="uncertain">
+          🤔 <strong>Still Unsure</strong> — I still don't have enough information to assess this claim
+        </label>
+      </div>
+    </div>
+
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.25rem;margin-bottom:1rem;">
+      <p style="font-weight:600;margin-bottom:.5rem;">Why did you reach that conclusion?</p>
+      <p style="color:var(--muted);font-size:.83rem;margin-bottom:.85rem;">Explain your reasoning in your own words. This helps reinforce your critical thinking.</p>
+      <textarea id="r6-reasoning-input" rows="4" placeholder="e.g. I chose 'unsupported' because the source had no citations and the language was very one-sided…"
+        style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.9rem 1rem;color:var(--text);font-family:'DM Sans',sans-serif;font-size:.9rem;resize:vertical;line-height:1.6;box-sizing:border-box;"></textarea>
+      <div style="font-family:'DM Mono',monospace;font-size:.68rem;color:var(--muted);margin-top:.4rem;" id="r6-char-count">0 characters</div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:.75rem;">
+      <button class="btn btn-skip" onclick="showPhaseR7(true)">Skip Reasoning</button>
+      <button class="btn btn-primary" onclick="showPhaseR7(false)">Submit My Assessment →</button>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 4: FINAL REFLECTION SUMMARY                         -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <div id="phase-r7-final" style="display:none;margin-bottom:2rem;">
+    <div class="section-label">🪞 Your Reflection Summary</div>
+    <div id="r7-card" style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;margin-bottom:1.5rem;">
+      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem;">
+        <div id="r7-position-badge" style="font-size:1.35rem;font-weight:800;"></div>
+        <div>
+          <div style="font-family:'DM Mono',monospace;font-size:.65rem;color:var(--muted);letter-spacing:.08em;">YOUR VERDICT</div>
+          <div id="r7-position-label" style="font-weight:700;font-size:1rem;"></div>
+        </div>
+      </div>
+      <div id="r7-reasoning-display" style="color:var(--muted);font-size:.88rem;line-height:1.7;border-top:1px solid var(--border);padding-top:1rem;margin-top:.5rem;"></div>
+      <div id="r7-save-status" style="font-family:'DM Mono',monospace;font-size:.68rem;color:var(--green);margin-top:.75rem;"></div>
+    </div>
+    <div class="reeval-box">
+      <div class="question">Review another content?</div>
+      <div class="mt-2" style="display:flex;gap:1rem;flex-wrap:wrap;">
+        <button class="btn btn-primary btn-sm" onclick="newEval()">Start New Evaluation</button>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- compat aliases for old JS references -->
+  <div style="display:none;" id="legacy-reeval"></div>
+  <div style="display:none;" id="phase-r1-summary"></div>
+  <div style="display:none;" id="r1-loading"></div>
+  <div style="display:none;" id="r1-content"></div>
+  <div style="display:none;" id="r1-steps-recap"></div>
+  <div style="display:none;" id="r1-lesson-recs"></div>
+  <div style="display:none;" id="phase-r2-evidence"></div>
+  <div style="display:none;" id="r2-loading"></div>
+  <div style="display:none;" id="r2-content"></div>
+  <div style="display:none;" id="r2-supporting"></div>
+  <div style="display:none;" id="r2-contradicting"></div>
+  <div style="display:none;" id="r2-neutral"></div>
+  <div style="display:none;" id="phase-r3-explore"></div>
+  <div style="display:none;" id="r3-loading"></div>
+  <div style="display:none;" id="r3-content"></div>
+  <div style="display:none;" id="phase-r4-reflect"></div>
+  <div style="display:none;" id="phase-r5-position"></div>
+  <div style="display:none;" id="phase-r6-reasoning"></div>
+
+</div><!-- /phase-results -->
+
+</div><!-- /app -->
+</div><!-- /main -->
+
+
+<div class="toast" id="toast"></div>
+
+<!-- ══ JAVASCRIPT ════════════════════════════════════════════ -->
+<script src="/pages/script.js" defer></script>
+<script src="/pages/index.js" defer></script>
+</body>
+</html>

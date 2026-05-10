@@ -1,0 +1,107 @@
+<!-- ══════════════════════════════════════════════════════════
+     SNIPPET A — User dashboard: mindmap progress card
+     Drop inside your existing dashboard card grid.
+     JS fetches /api/mindmap/progress on page load.
+════════════════════════════════════════════════════════════ -->
+
+<!-- Inside dashboard HTML, in the stats/cards section: -->
+<div class="mm-progress-card" id="mm-progress-card">
+  <div class="mm-progress-header">
+    <div class="mm-progress-title">🗺 Mindmap progress</div>
+    <div class="mm-progress-count" id="mm-dash-count">—</div>
+  </div>
+  <div class="mm-progress-bar-wrap">
+    <div class="mm-progress-bar-fill" id="mm-dash-bar" style="width:0%"></div>
+  </div>
+  <div class="mm-progress-last" id="mm-dash-last">Loading…</div>
+</div>
+
+<script>
+/* Drop this in your dashboard.js init block */
+(async function loadMindmapProgress() {
+  try {
+    const res  = await fetch('/api/mindmap/progress?map=main', { credentials: 'include' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const discovered = data.discovered || [];
+    const total      = data.total || 30;
+    const pct        = Math.round((discovered.length / total) * 100);
+
+    document.getElementById('mm-dash-count').textContent = `${discovered.length} / ${total}`;
+    document.getElementById('mm-dash-bar').style.width = pct + '%';
+
+    if (discovered.length === 0) {
+      document.getElementById('mm-dash-last').textContent = 'Start exploring → mindmap';
+    } else if (discovered.length === total) {
+      document.getElementById('mm-dash-last').innerHTML = '✦ <span>All nodes discovered!</span>';
+    } else {
+      // API should return last_node_label if available
+      const lastLabel = data.last_node_label;
+      document.getElementById('mm-dash-last').innerHTML = lastLabel
+        ? `Last visited: <span>${lastLabel}</span>`
+        : `${pct}% complete`;
+    }
+  } catch { /* card stays blank — non-critical */ }
+})();
+</script>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     SNIPPET B — Admin dashboard: mindmap editor tab
+     Add a "Mindmap" nav item in admin sidebar, and this section
+     inside the tab content switch block.
+════════════════════════════════════════════════════════════ -->
+
+<!-- In admin sidebar nav: -->
+<!--
+<button class="nav-item" onclick="showAdminTab('mindmap')">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>
+    <path d="M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1"/>
+  </svg>
+  Mindmap
+</button>
+-->
+
+<!-- In the tab content area (hidden until admin clicks Mindmap tab): -->
+<section id="admin-tab-mindmap" class="admin-tab-section" style="display:none">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem">
+    <h2 style="font-family:'Syne',sans-serif;font-size:1.2rem;font-weight:700">Mindmap Editor</h2>
+    <span style="font-size:.75rem;color:var(--muted);font-family:'DM Mono',monospace">map: main</span>
+  </div>
+
+  <!-- The canvas editor (populated by MMEditor.init) -->
+  <div id="admin-mindmap-editor-container" style="margin-bottom:2rem"></div>
+
+  <!-- Suggestions queue -->
+  <div style="margin-top:2rem">
+    <h3 style="font-size:.85rem;font-family:'DM Mono',monospace;color:var(--muted);
+               letter-spacing:.08em;text-transform:uppercase;margin-bottom:.8rem">
+      Pending suggestions
+    </h3>
+    <div id="suggestions-container"></div>
+  </div>
+</section>
+
+<script>
+/* Add this inside your showAdminTab() function: */
+/*
+function showAdminTab(tab) {
+  document.querySelectorAll('.admin-tab-section').forEach(s => s.style.display = 'none');
+  document.getElementById(`admin-tab-${tab}`).style.display = 'block';
+
+  if (tab === 'mindmap') {
+    const wrap = document.getElementById('admin-mindmap-editor-container');
+    if (!wrap._mmInit) {
+      wrap._mmInit = true;
+      MMEditor.init(wrap);
+    }
+    MMEditor.renderSuggestions(document.getElementById('suggestions-container'));
+  }
+}
+*/
+</script>
+
+<!-- Load admin_mindmap_editor.js before closing </body>: -->
+<!-- <script src="pages/admin_mindmap_editor.js"></script> -->

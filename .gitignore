@@ -1,0 +1,46 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+*.env.local
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ── Large data files (store on Railway volume or object storage instead) ──────
+data/embeddings.faiss
+data/embeddings_factcheck.faiss
+data/embeddings_news.faiss
+data/embeddings_stats.faiss
+data/corpus.db
+data/sentences_meta.json
+data/sentences_meta_factcheck.json
+data/sentences_meta_news.json
+data/sentences_meta_stats.json
+data/fever_dev.jsonl
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Test cache ────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
