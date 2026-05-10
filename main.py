@@ -144,11 +144,11 @@ async def serve_page(page: str):
     if safe == "admin":
         return RedirectResponse(url="/dashboard.html", status_code=301)
     return FileResponse(f"pages/{safe}.html")
-
+#Health
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
+#
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
