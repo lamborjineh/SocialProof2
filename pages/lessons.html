@@ -6,74 +6,362 @@
 <title>SocialProof — Lessons</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/pages/styles.css">
+<style id="topnav-css">
+/* ── TOPNAV BASE ──────────────────────────────────────────────── */
+.topnav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 900;
+  height: 56px;
+  background: rgba(13,13,18,.92);
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.07));
+  display: flex;
+  align-items: center;
+  padding: 0 1.2rem;
+  gap: 0;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.topnav-logo {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800;
+  font-size: 1.08rem;
+  color: var(--text, #e8e8ef);
+  text-decoration: none;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  margin-right: 1.6rem;
+  flex-shrink: 0;
+}
+.topnav-logo span { color: var(--accent, #4f8ef7); }
+.topnav-links {
+  display: flex;
+  align-items: center;
+  gap: .1rem;
+  flex: 1;
+  min-width: 0;
+  overflow: visible;
+}
+.topnav .nav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: .38rem;
+  font-family: 'DM Sans', sans-serif;
+  font-size: .82rem;
+  font-weight: 500;
+  color: var(--muted, #8b8b9a);
+  text-decoration: none;
+  padding: .36rem .7rem;
+  border-radius: 8px;
+  transition: background .15s, color .15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.topnav .nav-item svg { width: 14px; height: 14px; flex-shrink: 0; }
+.topnav .nav-item:hover  { background: rgba(255,255,255,.05); color: var(--text, #e8e8ef); }
+.topnav .nav-item.active { background: rgba(79,142,247,.12); color: var(--accent, #4f8ef7); }
+
+/* age group pushed to right */
+.topnav-age-group {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  margin-left: auto;
+  padding-left: .9rem;
+  flex-shrink: 0;
+}
+.topnav-age-label {
+  font-family: 'DM Mono', monospace;
+  font-size: .62rem;
+  color: var(--muted);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.topnav .age-pill {
+  font-family: 'DM Sans', sans-serif;
+  font-size: .7rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  border-radius: 6px;
+  padding: .18rem .48rem;
+  cursor: pointer;
+  transition: all .15s;
+  flex-shrink: 0;
+}
+.topnav .age-pill:hover,
+.topnav .age-pill.active { background: rgba(79,142,247,.12); color: var(--accent); border-color: rgba(79,142,247,.35); }
+.topnav-login { margin-left: .4rem; flex-shrink: 0; }
+
+/* Dashboard dropdown in topnav */
+.topnav .nav-group { position: relative; flex-shrink: 0; }
+.topnav .nav-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: .38rem;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: 'DM Sans', sans-serif;
+  font-size: .82rem;
+  font-weight: 500;
+  padding: .36rem .7rem;
+  border-radius: 8px;
+  white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+.topnav .nav-group-toggle:hover { background: rgba(255,255,255,.05); color: var(--text); }
+.topnav .nav-group-toggle.active-group { color: var(--accent); }
+.topnav .nav-group-toggle .nav-icon,
+.topnav .nav-group-toggle svg { width: 14px; height: 14px; }
+.topnav .nav-sub {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  background: var(--card, #17171e);
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  border-radius: 10px;
+  padding: .3rem;
+  min-width: 170px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.45);
+  z-index: 950;
+}
+.topnav .nav-sub.open { display: flex; flex-direction: column; gap: .05rem; }
+.topnav .nav-sub-item {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  font-family: 'DM Sans', sans-serif;
+  font-size: .8rem;
+  color: var(--muted);
+  text-decoration: none;
+  padding: .38rem .6rem;
+  border-radius: 7px;
+  transition: background .15s, color .15s;
+}
+.topnav .nav-sub-item:hover { background: rgba(255,255,255,.05); color: var(--text); }
+
+/* Burger — desktop hidden */
+.topnav-burger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  padding: .3rem;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.topnav-burger svg { width: 22px; height: 22px; display: block; }
+.topnav-burger:hover { color: var(--text); }
+
+/* ── MOBILE DRAWER ───────────────────────────────────────────── */
+.topnav-drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 260px;
+  background: var(--surface, #0f0f13);
+  border-left: 1px solid var(--border, rgba(255,255,255,.08));
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform .25s ease;
+}
+.topnav-drawer.open { transform: translateX(0); }
+.topnav-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+  z-index: 1050;
+  cursor: pointer;
+}
+.topnav-overlay.open { display: block; }
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1.1rem;
+  border-bottom: 1px solid var(--border);
+  height: 56px;
+  flex-shrink: 0;
+}
+.drawer-close-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  padding: .3rem;
+  border-radius: 6px;
+  display: flex;
+}
+.drawer-close-btn svg { width: 18px; height: 18px; display: block; }
+.drawer-close-btn:hover { color: var(--text); }
+.drawer-nav {
+  display: flex;
+  flex-direction: column;
+  padding: .5rem .5rem;
+  gap: .05rem;
+  flex: 1;
+  overflow-y: auto;
+}
+.drawer-nav .nav-item {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-family: 'DM Sans', sans-serif;
+  font-size: .88rem;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+  padding: .55rem .75rem;
+  border-radius: 9px;
+  transition: background .15s, color .15s;
+}
+.drawer-nav .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
+.drawer-nav .nav-item:hover  { background: rgba(255,255,255,.05); color: var(--text); }
+.drawer-nav .nav-item.active { background: rgba(79,142,247,.12); color: var(--accent); }
+.drawer-age {
+  padding: .6rem .85rem .9rem;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* ── LAYOUT FIXES ────────────────────────────────────────────── */
+/* Push all page content below topnav */
+body { padding-top: 56px !important; }
+/* Kill old sidebar + burger — their HTML is removed but styles.css may have them */
+.sidebar         { display: none !important; }
+.sidebar-overlay { display: none !important; }
+.burger-btn      { display: none !important; }
+/* Remove old sidebar left-margin from .main */
+.main { margin-left: 0 !important; }
+
+/* ── MINDMAP SPECIFIC ────────────────────────────────────────── */
+/* The mindmap #nav hint bar sits below topnav */
+body.mindmap-page #nav {
+  top: 56px !important;
+}
+/* The full-screen canvas starts below topnav */
+body.mindmap-page #canvas {
+  top: 56px !important;
+  height: calc(100vh - 56px) !important;
+}
+/* Tree panel (right sidebar) starts below topnav */
+body.mindmap-page #tree-panel {
+  top: 56px !important;
+  height: calc(100vh - 56px) !important;
+}
+/* Left detail panel */
+body.mindmap-page #panel {
+  top: 56px !important;
+}
+/* Spotlight overlay — stays over everything */
+body.mindmap-page #spotlight-overlay { z-index: 1200 !important; }
+
+/* ── MOBILE ──────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .topnav-links  { display: none; }
+  .topnav-burger { display: flex; }
+}
+</style>
 </head>
 <body>
+<script id="topnav-js">
+(function(){
+  function _toggle(){
+    var drawer  = document.getElementById('topnav-drawer');
+    var overlay = document.getElementById('sidebar-overlay');
+    if(!drawer) return;
+    var open = drawer.classList.toggle('open');
+    if(overlay) overlay.classList.toggle('open', open);
+    document.body.style.overflow = open ? 'hidden' : '';
+  }
+  // override whatever script.js defines later
+  window.toggleSidebar = _toggle;
+  // re-apply after DOMContentLoaded in case script.js overwrites it
+  document.addEventListener('DOMContentLoaded', function(){ window.toggleSidebar = _toggle; });
+})();
+</script>
+
 <div class="grid-bg"></div>
-<aside class="sidebar" id="sidebar">
-  <div class="sidebar-header">
-    <a href="index.html" class="sidebar-logo">Social<span>Proof</span></a>
-    <button class="sidebar-close-btn" onclick="toggleSidebar()" title="Close sidebar">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M18 6L6 18M6 6l12 12"/>
-      </svg>
-    </button>
-  </div>
-  <nav class="sidebar-nav">
-    <a href="index.html" class="nav-item">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-      Practice
+<!-- ── TOPNAV ── -->
+<nav class="topnav" id="topnav">
+  <a href="index.html" class="topnav-logo">Social<span>Proof</span></a>
+  <div class="topnav-links">
+    <a href="index.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>Practice
     </a>
-    <div class="nav-group" id="nav-group-lessons">
-      <button class="nav-group-toggle open" id="nav-lessons-toggle" onclick="toggleNavGroup('lessons')">
-        <span class="toggle-left">
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-          Lessons
-        </span>
-      </button>
-      <div class="nav-sub open" id="nav-sub-lessons">
-        <button class="nav-sub-item active" id="nav-sub-lessons-lessons" onclick="switchLessonsTab('lessons')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-          Lessons &amp; Quiz
-        </button>
-        <button class="nav-sub-item" id="nav-sub-lessons-prebunking" onclick="switchLessonsTab('prebunking')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 0-2-2V9m0 0h18"/></svg>
-          Prebunking Lab
-        </button>
-      </div>
-    </div>
-    <a href="mindmap.html" class="nav-item">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-      Explore
+    <a href="lessons.html" class="nav-item user-only-nav active">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>Lessons
+    </a>
+    <a href="mindmap.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>My Map
     </a>
     <a href="dashboard.html" class="nav-item">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
       Dashboard
     </a>
-  </nav>
-  <div class="sidebar-section">Age Mode</div>
-  <div class="age-mode-grid">
-        <button class="age-pill" id="age-youth"  onclick="setAgeMode('youth')">Youth</button>
-    <button class="age-pill" id="age-adult" onclick="setAgeMode('adult')">Adult</button>
-    <button class="age-pill" id="age-older" onclick="setAgeMode('older')">Seniors</button>
-  </div>
-  <div class="sidebar-footer">
-    <a href="login.html" class="nav-item" id="sidebar-login-link">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
-        <polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
-      </svg>
-      Login
+    <div class="topnav-age-group">
+      <span class="topnav-age-label">Age</span>
+      <button class="age-pill" id="age-youth"  onclick="setAgeMode('youth')">Youth</button>
+      <button class="age-pill" id="age-adult" onclick="setAgeMode('adult')">Adult</button>
+      <button class="age-pill" id="age-older" onclick="setAgeMode('older')">Senior</button>
+    </div>
+    <a href="login.html" class="nav-item topnav-login" id="sidebar-login-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>Login
     </a>
   </div>
-</aside>
-<div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
-<button class="burger-btn" id="burger-btn" onclick="toggleSidebar()" title="Open menu">
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <line x1="3" y1="6" x2="21" y2="6"/>
-    <line x1="3" y1="12" x2="21" y2="12"/>
-    <line x1="3" y1="18" x2="21" y2="18"/>
-  </svg>
-</button>
+  <button class="topnav-burger" onclick="toggleSidebar()" title="Menu" aria-label="Menu">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+    </svg>
+  </button>
+</nav>
+<!-- Mobile drawer -->
+<div class="topnav-drawer" id="topnav-drawer">
+  <div class="drawer-header">
+    <a href="index.html" class="topnav-logo">Social<span>Proof</span></a>
+    <button class="drawer-close-btn" onclick="toggleSidebar()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <nav class="drawer-nav">
+    <a href="index.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>Practice
+    </a>
+    <a href="lessons.html" class="nav-item user-only-nav active">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>Lessons
+    </a>
+    <a href="mindmap.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>My Map
+    </a>
+    <a href="dashboard.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      Dashboard
+    </a>
+    <a href="login.html" class="nav-item" id="sidebar-login-link-m">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>Login
+    </a>
+  </nav>
+  <div class="drawer-age">
+    <div class="sidebar-section">Age Mode</div>
+    <div class="age-mode-grid">
+      <button class="age-pill" id="age-youth-m"  onclick="setAgeMode('youth')">Youth</button>
+      <button class="age-pill" id="age-adult-m" onclick="setAgeMode('adult')">Adult</button>
+      <button class="age-pill" id="age-older-m" onclick="setAgeMode('older')">Senior</button>
+    </div>
+  </div>
+</div>
+<div class="topnav-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+
 <div class="main" id="main">
 <div class="app">
 
@@ -81,7 +369,7 @@
   <div class="topbar-left">
     <div>
       <div class="topbar-title">Learn</div>
-      <div class="topbar-sub">LESSONS · QUIZ · PREBUNKING</div>
+      <div class="topbar-sub">LESSONS · QUIZ</div>
     </div>
   </div>
 </div>
@@ -112,14 +400,9 @@
   <input class="search-input" id="search" placeholder="Search lessons…" oninput="filterLessons()">
 </div>
 
-<!-- Filter bar -->
-<div class="filter-bar">
+<!-- Filter bar — populated dynamically from loaded lessons -->
+<div class="filter-bar" id="filter-bar">
   <button class="filter-btn active" data-filter="all" onclick="setFilter(this,'all')">📚 All</button>
-  <button class="filter-btn" data-filter="claim_detection" onclick="setFilter(this,'claim_detection')">🎯 Claim Detection</button>
-  <button class="filter-btn" data-filter="source_verification" onclick="setFilter(this,'source_verification')">🔍 Source Verification</button>
-  <button class="filter-btn" data-filter="bias_detection" onclick="setFilter(this,'bias_detection')">🔥 Bias Detection</button>
-  <button class="filter-btn" data-filter="evidence_evaluation" onclick="setFilter(this,'evidence_evaluation')">📊 Evidence Evaluation</button>
-  <button class="filter-btn" data-filter="general" onclick="setFilter(this,'general')">📖 General MIL</button>
 </div>
 
 <!-- Lessons grid -->
@@ -128,14 +411,13 @@
   <span>🔍</span>No lessons match your search.
 </div>
 
-</div>
 
 <!-- ── Practice Quiz Section ─────────────────────────────── -->
 <div id="quiz" style="margin-top:3rem;">
   <div class="pb-eyebrow" style="margin-top:2rem;">Practice Quiz</div>
   <h2 style="margin-bottom:.5rem;">Test Your Skills</h2>
   <p style="margin-bottom:2rem;line-height:1.6;color:var(--muted);font-size:.93rem;">
-    Scenario-based questions across all MIL topics. Get instant feedback and find where to improve.
+    Select a topic
   </p>
 
   <canvas id="confetti-canvas" style="position:fixed;inset:0;pointer-events:none;z-index:998;"></canvas>
@@ -143,37 +425,12 @@
   <!-- Start Screen -->
   <div id="quiz-screen-start">
     <div class="card" style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:1.8rem;margin-bottom:1.5rem;">
-      <div id="daily-badge-wrap"></div>
       <div class="topic-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.75rem;margin-bottom:1.5rem;" id="quiz-topic-grid">
-        <div class="topic-card" data-topic="all" onclick="quizSelectTopic(this,'all')" style="padding:1rem;border-radius:12px;border:1px solid var(--accent);background:rgba(79,142,247,.08);cursor:pointer;transition:all .2s;">
-          <div style="font-size:1.4rem;margin-bottom:.4rem;">📚</div>
-          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;margin-bottom:.2rem;">All Topics</div>
-          <div style="font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);">Mixed practice</div>
-        </div>
-        <div class="topic-card" data-topic="claim_detection" onclick="quizSelectTopic(this,'claim_detection')" style="padding:1rem;border-radius:12px;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:all .2s;">
-          <div style="font-size:1.4rem;margin-bottom:.4rem;">🎯</div>
-          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;margin-bottom:.2rem;">Claim Detection</div>
-          <div style="font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);">Identify factual claims</div>
-        </div>
-        <div class="topic-card" data-topic="source_verification" onclick="quizSelectTopic(this,'source_verification')" style="padding:1rem;border-radius:12px;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:all .2s;">
-          <div style="font-size:1.4rem;margin-bottom:.4rem;">🔍</div>
-          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;margin-bottom:.2rem;">Source Verification</div>
-          <div style="font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);">Investigate credibility</div>
-        </div>
-        <div class="topic-card" data-topic="bias_detection" onclick="quizSelectTopic(this,'bias_detection')" style="padding:1rem;border-radius:12px;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:all .2s;">
-          <div style="font-size:1.4rem;margin-bottom:.4rem;">⚡</div>
-          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;margin-bottom:.2rem;">Bias Detection</div>
-          <div style="font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);">Spot emotional language</div>
-        </div>
-        <div class="topic-card" data-topic="evidence_evaluation" onclick="quizSelectTopic(this,'evidence_evaluation')" style="padding:1rem;border-radius:12px;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:all .2s;">
-          <div style="font-size:1.4rem;margin-bottom:.4rem;">🧪</div>
-          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;margin-bottom:.2rem;">Evidence Evaluation</div>
-          <div style="font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);">Assess evidence quality</div>
-        </div>
+        <!-- Populated dynamically by renderQuizTopicCards() after lessons load -->
+        <div style="color:var(--muted);font-size:.8rem;padding:.5rem;">Loading topics…</div>
       </div>
       <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
         <button onclick="quizStart()" style="display:inline-flex;align-items:center;gap:.5rem;font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;padding:.7rem 1.6rem;border-radius:10px;border:none;cursor:pointer;background:var(--accent);color:#fff;transition:all .2s;">▶ Start Quiz</button>
-        <span id="quiz-q-count" style="font-family:'DM Mono',monospace;font-size:.78rem;color:var(--muted);">Loading…</span>
       </div>
     </div>
   </div>
@@ -193,9 +450,33 @@
       <div style="height:120px;display:flex;align-items:center;justify-content:center;font-family:'DM Mono',monospace;font-size:.8rem;color:var(--muted);">Loading questions…</div>
     </div>
     <div id="quiz-feedback-box" style="display:none;padding:1rem 1.2rem;border-radius:12px;margin-bottom:1rem;font-size:.9rem;line-height:1.55;"></div>
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
-      <button id="quiz-skip-btn" onclick="quizSkip()" style="font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted);background:none;border:none;cursor:pointer;padding:.3rem;letter-spacing:.04em;">Skip →</button>
-      <button id="quiz-next-btn" onclick="quizNext()" style="display:none;font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;padding:.7rem 1.6rem;border-radius:10px;border:none;cursor:pointer;background:var(--accent);color:#fff;">Next Question →</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap;margin-top:.25rem;">
+      <!-- Left: Back to Topics -->
+      <button id="quiz-back-topics-btn" onclick="quizBackToTopics()"
+        style="display:inline-flex;align-items:center;gap:.35rem;font-family:'Syne',sans-serif;font-size:.88rem;font-weight:600;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:10px;cursor:pointer;padding:.6rem 1.2rem;transition:all .2s;"
+        onmouseenter="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
+        onmouseleave="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
+        ← Topics
+      </button>
+      <!-- Right group: Prev + Skip + Next -->
+      <div style="display:flex;align-items:center;gap:.5rem;">
+        <button id="quiz-prev-btn" onclick="quizPrev()"
+          style="display:none;font-family:'Syne',sans-serif;font-size:.88rem;font-weight:600;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:10px;cursor:pointer;padding:.6rem 1.2rem;transition:all .2s;"
+          onmouseenter="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
+          onmouseleave="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
+          ‹ Prev
+        </button>
+        <button id="quiz-skip-btn" onclick="quizSkip()"
+          style="display:inline-flex;align-items:center;font-family:'Syne',sans-serif;font-size:.88rem;font-weight:600;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:10px;cursor:pointer;padding:.6rem 1.2rem;transition:all .2s;"
+          onmouseenter="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
+          onmouseleave="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
+          Skip ›
+        </button>
+        <button id="quiz-next-btn" onclick="quizNext()"
+          style="display:none;font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;padding:.6rem 1.5rem;border-radius:10px;border:none;cursor:pointer;background:var(--accent);color:#fff;transition:all .2s;">
+          Next →
+        </button>
+      </div>
     </div>
   </div>
 
@@ -211,94 +492,19 @@
       <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.2rem;margin-bottom:.4rem;" id="quiz-result-headline">—</div>
       <div style="font-size:.9rem;color:var(--muted);" id="quiz-result-subline">—</div>
     </div>
+
     <div style="display:flex;gap:.75rem;justify-content:center;flex-wrap:wrap;margin-top:1rem;">
-      <button onclick="quizRetry()" style="font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;padding:.7rem 1.6rem;border-radius:10px;border:none;cursor:pointer;background:var(--accent);color:#fff;">Try Again</button>
-      <button onclick="document.getElementById('quiz-screen-results').style.display='none';document.getElementById('quiz-screen-start').style.display='';switchLessonsTab('lessons');" style="font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;padding:.7rem 1.6rem;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;">Back to Lessons</button>
+      <button onclick="quizRetry()" style="font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;padding:.6rem 1.5rem;border-radius:10px;border:none;cursor:pointer;background:var(--accent);color:#fff;transition:all .2s;">Try Again</button>
+      <button onclick="quizBackToTopics()" style="font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;padding:.6rem 1.2rem;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;transition:all .2s;"
+        onmouseenter="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
+        onmouseleave="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">← Back to Topics</button>
     </div>
   </div>
 </div>
+</div><!-- /#tab-lessons -->
 <!-- ── End Practice Quiz ───────────────────────────────────── -->
 
-
-
-<div id="tab-prebunking" style="display:none;">
-
-  <div class="pb-header">
-    <div class="pb-eyebrow">Inoculation Training</div>
-    <h2 class="pb-title">Prebunking Lab</h2>
-    <p class="pb-sub">Learn to recognize manipulation techniques <em>before</em> you encounter them — the most effective defense against misinformation.</p>
   </div>
-
-  <div class="prog-label"><strong id="pb-prog-text">Loading modules…</strong></div>
-  <div class="progress-track" id="pb-progress-track"></div>
-
-  <div class="overall-card">
-    <div class="score-ring">
-      <svg viewBox="0 0 72 72" width="72" height="72">
-        <circle class="ring-bg" cx="36" cy="36" r="30"/>
-        <circle class="ring-fill" id="pb-ring-fill" cx="36" cy="36" r="30"/>
-      </svg>
-    </div>
-    <div>
-      <div class="overall-label">Inoculation Score</div>
-      <div class="overall-val" id="pb-overall-val">—</div>
-      <div class="overall-sub" id="pb-overall-sub">Complete exercises to build resistance</div>
-    </div>
-  </div>
-
-  <div id="pb-module-area"></div>
-
-  <!-- ── Prebunking Quiz ───────────────────────────────────────────────── -->
-  <div id="pb-quiz-section" style="margin-top:2.5rem;">
-    <div class="pb-header" style="margin-bottom:1.25rem;">
-      <div class="pb-eyebrow">Test Your Defenses</div>
-      <h2 class="pb-title" style="font-size:1.4rem;">Prebunking Quiz</h2>
-      <p class="pb-sub">Apply what you've learned — can you spot the manipulation technique being used?</p>
-    </div>
-
-    <!-- Start screen -->
-    <div id="pbq-start" class="quiz-start-card">
-      <div style="font-size:2.2rem;margin-bottom:.6rem;">🧪</div>
-      <h3 style="margin:0 0 .4rem;font-size:1.1rem;">Technique Recognition Quiz</h3>
-      <p style="color:var(--muted);font-size:.88rem;margin:0 0 1.2rem;max-width:380px;text-align:center;">Identify which manipulation technique is at play in each scenario. Questions are drawn from your Prebunking Lab modules.</p>
-      <div id="pbq-no-questions" style="display:none;color:var(--muted);font-size:.84rem;margin-bottom:1rem;">No prebunking questions available yet — an admin needs to add some first.</div>
-      <button class="btn" id="pbq-start-btn" onclick="startPbQuiz()">Start Quiz</button>
-    </div>
-
-    <!-- Quiz in-progress -->
-    <div id="pbq-running" style="display:none;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
-        <span id="pbq-counter" style="font-size:.78rem;color:var(--muted);font-family:'DM Mono',monospace;"></span>
-        <span id="pbq-score-live" style="font-size:.78rem;color:var(--accent);font-family:'DM Mono',monospace;font-weight:600;"></span>
-      </div>
-      <div class="progress-track" style="margin-bottom:1.4rem;"><div class="progress-bar" id="pbq-prog-bar" style="width:0%;"></div></div>
-
-      <!-- Media area -->
-      <div id="pbq-media" style="margin-bottom:1rem;display:none;"></div>
-
-      <div class="quiz-card" id="pbq-card">
-        <p class="quiz-question" id="pbq-question"></p>
-        <div class="quiz-options" id="pbq-options"></div>
-        <div id="pbq-feedback" class="quiz-feedback" style="display:none;"></div>
-        <div style="text-align:right;margin-top:1rem;">
-          <button class="btn btn-sm" id="pbq-next-btn" style="display:none;" onclick="pbqNext()">Next →</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Results screen -->
-    <div id="pbq-results" style="display:none;" class="quiz-results-card">
-      <div style="font-size:2.5rem;margin-bottom:.5rem;" id="pbq-result-emoji">🎉</div>
-      <h3 style="margin:0 0 .3rem;" id="pbq-result-title">Quiz Complete!</h3>
-      <div class="quiz-score-big" id="pbq-result-score"></div>
-      <p style="color:var(--muted);font-size:.85rem;margin:.5rem 0 1.2rem;" id="pbq-result-msg"></p>
-      <div id="pbq-missed-list" style="text-align:left;margin-bottom:1.2rem;"></div>
-      <button class="btn" onclick="startPbQuiz()">Try Again</button>
-    </div>
-  </div>
-
-</div>
-
 <!-- Modal (fixed overlay — position doesn't affect layout) -->
 <div class="modal-overlay" id="modal-overlay" onclick="closeModalOutside(event)">
   <div class="modal" id="modal">
@@ -309,5 +515,20 @@
 </div><!-- /.main -->
 <script src="/pages/script.js" defer></script>
 <script src="/pages/lessons.js" defer></script>
+
+<!-- ── Pretest Overlay ───────────────────────────────────────────────────────── -->
+<div id="sp-pretest-overlay" style="display:none;position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:1rem;">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:20px;max-width:560px;width:100%;max-height:90vh;overflow-y:auto;padding:2rem;">
+    <div id="sp-pretest-modal-body"></div>
+  </div>
+</div>
+
+<!-- ── Posttest Overlay ──────────────────────────────────────────────────────── -->
+<div id="sp-posttest-overlay" style="display:none;position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:1rem;">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:20px;max-width:560px;width:100%;max-height:90vh;overflow-y:auto;padding:2rem;">
+    <div id="sp-posttest-modal-body"></div>
+  </div>
+</div>
+
 </body>
 </html>

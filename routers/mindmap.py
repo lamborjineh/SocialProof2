@@ -27,12 +27,13 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
+import httpx
 import sqlalchemy as sa
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from config import logger
+from config import GEMINI_API_KEY, GROQ_API_KEY, logger
 from database.models import (
     MindmapEdgeORM,
     MindmapInteractionORM,
@@ -324,6 +325,167 @@ async def save_mindmap_progress(
         raise HTTPException(status_code=500, detail="Failed to save progress.")
     finally:
         db.close()
+
+
+@router.delete("/api/mindmap/progress/{node_id}", status_code=200)
+async def delete_mindmap_progress_node(
+    node_id: str,
+    request: Request,
+    map: str = Query("main"),
+    authorization: str = Header(None),
+):
+    """
+    Un-discover a single node — deletes the user's mindmap_progress row for it.
+    The node itself (on the main map) is untouched; only the user's discovery
+    record is removed. Next time they answer the linked quiz question or read
+    the linked lesson, it will be re-unlocked.
+    """
+    payload = get_current_user(request, authorization)
+    user_id = int(payload["sub"])
+
+    db = Session(engine)
+    try:
+        deleted = db.query(MindmapProgressORM).filter_by(
+            user_id=user_id, map_id=map, node_id=node_id
+        ).delete(synchronize_session=False)
+        db.commit()
+        return {"ok": True, "deleted": node_id, "rows": deleted}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[Mindmap] progress delete error user={user_id} node={node_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete progress entry.")
+    finally:
+        db.close()
+
+
+@router.delete("/api/mindmap/progress", status_code=200)
+async def delete_mindmap_progress_all(
+    request: Request,
+    map: str = Query("main"),
+    authorization: str = Header(None),
+):
+    """
+    Reset all discovered nodes for the current user on a given map.
+    Useful for testing or if the user wants a fresh start.
+    """
+    payload = get_current_user(request, authorization)
+    user_id = int(payload["sub"])
+
+    db = Session(engine)
+    try:
+        deleted = db.query(MindmapProgressORM).filter_by(
+            user_id=user_id, map_id=map
+        ).delete(synchronize_session=False)
+        db.commit()
+        return {"ok": True, "map_id": map, "rows_deleted": deleted}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[Mindmap] progress reset error user={user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reset progress.")
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PUBLIC — AI SUGGEST  (Gemini 2.5 Flash → Groq llama-3.3-70b fallback)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_AI_SUGGEST_PROMPT = """You are helping a user build a personal knowledge mindmap.
+The user is adding sub-topics to a node called "{node_label}".
+{node_sub_line}
+{context_line}
+Existing nodes already on the map: {existing_labels}.
+
+Suggest exactly 4 related sub-topic nodes they could add. Each should be distinct, meaningful, and not already listed.
+Respond ONLY with a valid JSON array, no markdown, no preamble. Format:
+[{{"label":"...", "icon":"<single emoji>", "reason":"<one sentence why it matters>", "color":"<one of: #4488ff #ff3b3b #9b6eff #38d4d4 #ff7a30 #f5b731 #2fd469 #e857c0>"}}]"""
+
+
+class AISuggestRequest(BaseModel):
+    node_label:      str            = "a new topic"
+    node_sub:        str | None     = None
+    user_context:    str | None     = None
+    existing_labels: str | None     = None
+
+
+async def _call_gemini(prompt: str) -> list:
+    """Call Gemini 2.5 Flash. Returns parsed list or raises."""
+    import json
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 1000},
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+    data = r.json()
+    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    return json.loads(text.strip())
+
+
+async def _call_groq(prompt: str) -> list:
+    """Call Groq llama-3.3-70b-versatile. Returns parsed list or raises."""
+    import json, re as _re
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    payload = {
+        "model":       "llama-3.3-70b-versatile",
+        "messages":    [{"role": "user", "content": prompt}],
+        "max_tokens":  1000,
+        "temperature": 0.7,
+    }
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        r.raise_for_status()
+    data  = r.json()
+    text  = data["choices"][0]["message"]["content"]
+    clean = _re.sub(r"```json|```", "", text).strip()
+    return json.loads(clean)
+
+
+@router.post("/api/mindmap/ai-suggest")
+async def ai_suggest(body: AISuggestRequest):
+    """
+    Generate 4 mindmap node suggestions using Gemini 2.5 Flash (primary)
+    with Groq llama-3.3-70b-versatile as fallback.
+    No auth required — prompt contains no sensitive user data.
+    """
+    if not GEMINI_API_KEY and not GROQ_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="AI suggest is not configured. Set GEMINI_API_KEY or GROQ_API_KEY in .env.",
+        )
+
+    prompt = _AI_SUGGEST_PROMPT.format(
+        node_label      = body.node_label,
+        node_sub_line   = f'Description: "{body.node_sub}"' if body.node_sub else "",
+        context_line    = f'User context: "{body.user_context}"' if body.user_context else "",
+        existing_labels = body.existing_labels or "none yet",
+    )
+
+    # ── Primary: Gemini 2.5 Flash ────────────────────────────────────────────
+    if GEMINI_API_KEY:
+        try:
+            suggestions = await _call_gemini(prompt)
+            logger.info("[AI Suggest] Gemini 2.5 Flash returned %d suggestions.", len(suggestions))
+            return {"suggestions": suggestions, "provider": "gemini"}
+        except Exception as e:
+            logger.warning("[AI Suggest] Gemini failed (%s) — trying Groq fallback.", e)
+
+    # ── Fallback: Groq llama-3.3-70b-versatile ───────────────────────────────
+    if GROQ_API_KEY:
+        try:
+            suggestions = await _call_groq(prompt)
+            logger.info("[AI Suggest] Groq fallback returned %d suggestions.", len(suggestions))
+            return {"suggestions": suggestions, "provider": "groq"}
+        except Exception as e:
+            logger.error("[AI Suggest] Groq fallback also failed: %s", e)
+
+    raise HTTPException(status_code=502, detail="AI suggest failed on all providers. Try again shortly.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

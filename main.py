@@ -1,5 +1,5 @@
 """
-SocialProof — FastAPI Application Entry Point  (merged v3.0)
+SocialProof — FastAPI Application Entry Point
 Run with:
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
@@ -20,8 +20,8 @@ from config import logger, CORS_ORIGINS
 from core.model_registry import ModelRegistry
 from database.models import init_mysql_schema
 from routers.dashboard   import router as dashboard_router
-from routers.prebunking  import router as prebunking_router
-from routers.mindmap     import router as mindmap_router
+from routers.mindmap      import router as mindmap_router
+from routers.user_mindmap import router as user_mindmap_router
 from routers import (
     analyze_router,
     lessons_router,
@@ -61,6 +61,14 @@ async def lifespan(app: FastAPI):
         logger.info("BGE-M3 Retriever pre-loaded.")
     except Exception as e:
         logger.warning(f"Retriever pre-warm skipped (will load on first request): {e}")
+
+    # ── [Workmate 2] Pre-warm EasyOCR so the first image request isn't slow ──
+    try:
+        from pipeline.image_input import preload_ocr
+        preload_ocr()
+        logger.info("EasyOCR model pre-loaded.")
+    except Exception as e:
+        logger.warning(f"OCR pre-warm skipped (will load on first image request): {e}")
 
     yield
     # ── Shutdown ─────────────────────────────────────────────────────────────
@@ -116,14 +124,21 @@ app.include_router(lessons_router)
 app.include_router(quiz_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
-app.include_router(prebunking_router)
 app.include_router(dashboard_router)
 app.include_router(mindmap_router)
+app.include_router(user_mindmap_router)
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 # IMPORTANT: static mount must come before any catch-all HTML routes,
 # otherwise /{page}.html matches /pages/styles.css first and returns 404.
 app.mount("/pages", StaticFiles(directory="pages"), name="pages")
+
+# ── [Workmate 1] Serve admin-uploaded media (quiz images/videos uploaded via /admin/upload)
+# Use an absolute path anchored to this file so the correct directory is found
+# regardless of the working directory uvicorn is launched from.
+_assets_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "assets", "uploads")
+os.makedirs(_assets_dir, exist_ok=True)
+app.mount("/assets/uploads", StaticFiles(directory=_assets_dir), name="uploads")
 
 @app.get("/")
 async def serve_index():
@@ -144,11 +159,8 @@ async def serve_page(page: str):
     if safe == "admin":
         return RedirectResponse(url="/dashboard.html", status_code=301)
     return FileResponse(f"pages/{safe}.html")
-#Health
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-#
+
+
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn

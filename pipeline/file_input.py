@@ -9,6 +9,7 @@ Supported formats:
   .pptx  — python-pptx (slide text frames)
   .html  — BeautifulSoup (strips tags, extracts body text)
   .txt   — plain UTF-8 read
+  .csv   — stdlib csv (header + rows as pipe-separated text)
   .json  — dumps values as readable text
 
 Usage (called by routers/analyze.py):
@@ -42,6 +43,7 @@ EXTENSION_MAP = {
     ".html": "html",
     ".htm":  "html",
     ".txt":  "txt",
+    ".csv":  "csv",
     ".json": "json",
 }
 
@@ -51,6 +53,8 @@ MIME_MAP = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
     "text/html":                                                        "html",
     "text/plain":                                                       "txt",
+    "text/csv":                                                         "csv",
+    "application/csv":                                                  "csv",
     "application/json":                                                 "json",
 }
 
@@ -215,6 +219,36 @@ def _extract_txt(file_bytes: bytes) -> Optional[str]:
         return None
 
 
+def _extract_csv(file_bytes: bytes) -> Optional[str]:
+    try:
+        import csv
+        import io as _io
+
+        text = file_bytes.decode("utf-8", errors="ignore")
+        reader = csv.reader(_io.StringIO(text))
+        rows: list[str] = []
+        for i, row in enumerate(reader):
+            if i == 0:
+                # Header row — label it clearly
+                rows.append("Columns: " + " | ".join(cell.strip() for cell in row if cell.strip()))
+            else:
+                line = " | ".join(cell.strip() for cell in row if cell.strip())
+                if line:
+                    rows.append(line)
+
+        combined = "\n".join(rows).strip()
+        if combined:
+            logger.info(f"[File] CSV: extracted {len(rows)} rows, {len(combined)} chars.")
+            return combined
+
+        logger.warning("[File] CSV: no content found.")
+        return None
+
+    except Exception as e:
+        logger.warning(f"[File] CSV extraction failed: {e}")
+        return None
+
+
 def _extract_json(file_bytes: bytes) -> Optional[str]:
     try:
         data = json.loads(file_bytes.decode("utf-8", errors="ignore"))
@@ -253,6 +287,7 @@ _EXTRACTORS = {
     "pptx": _extract_pptx,
     "html": _extract_html,
     "txt":  _extract_txt,
+    "csv":  _extract_csv,
     "json": _extract_json,
 }
 

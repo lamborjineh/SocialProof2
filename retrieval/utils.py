@@ -1,6 +1,6 @@
 """
 retrieval/utils.py — Shared retrieval helpers
-SocialProof v3.3
+SocialProof v3.4
 
 Fixes applied in this version:
   #5  — trust_normalised() now uses the full REPUTATION registry properly;
@@ -10,6 +10,17 @@ Fixes applied in this version:
   #13 — recency_boost() updated: evidence older than 2 yr gets 0.5x weight,
          older than 5 yr gets 0.3x. date_published preferred over URL parsing
          when available.
+  #14 — Entity identity scoring added (v3.4).
+         Addresses "topic neighbor vs same event" retrieval problem:
+         "Duterte ICC" and "Bato ICC" are semantically close but
+         contextually different events. entity_identity_score() extracts
+         named entities from a claim and scores candidate text on:
+           - entity overlap bonus  (shared actors/places/events)
+           - entity mismatch penalty (central claim entities absent from text)
+         apply_entity_rerank() applies this as a post-retrieval adjustment to
+         hybrid_score, keeping semantic similarity but penalising topic drift.
+         context_identity_label() maps the combined score to a 3-tier UI label:
+           ✅ Same event/context | ⚠ Related topic | ❌ Broad thematic similarity
 
 Import from here in every retrieval module. Do NOT redefine these locally.
 """
@@ -35,17 +46,38 @@ W_RECENCY  = 0.2
 
 # ── Numeric query detection ───────────────────────────────────────────────────
 
-_NUMERIC_QUERY_RE = re.compile(
-    r"\b(rate|percent|%|gdp|inflation|unemployment|poverty|population|"
-    r"statistics?|data|figure|number|growth|index|ratio|income|wage|"
-    r"production|export|import|revenue|budget|deficit|surplus)\b",
+_NUMERIC_DOMAIN_RE = re.compile(
+    r"\b(rate|percent|%|gdp|inflat\w*|unemploy\w*|pover\w*|popul\w*|"
+    r"statistic\w*|econom\w*|financ\w*|fiscal\w*|monetar\w*|"
+    r"trade|tariff|deficit|surplus|budget\w*|revenue\w*|"
+    r"price\w*|cost\w*|wage\w*|incom\w*|"
+    r"food\w*|hunger\w*|famin\w*|malnutrit\w*|"
+    r"supply\w*|demand\w*|commodit\w*|harvest\w*|agri\w*|"
+    r"currenc\w*|peso|exchang\w*|depreciat\w*|appreciat\w*|"
+    r"growth|productiv\w*|output\w*|export\w*|import\w*|"
+    r"climat\w*|emiss\w*|vulnerab\w*|insecur\w*|"
+    r"index\w*|indicator\w*|forecast\w*|outlook\w*)\b",
+    re.I,
+)
+
+_NUMERIC_STRUCTURAL_RE = re.compile(
+    r"\b(top\s+\d+|among\s+top|rank\w*|"
+    r"impact\w*|at\s+risk|risk\s+of|"
+    r"increas\w*|decreas\w*|surg\w*|spik\w*|drop\w*|declin\w*|"
+    r"highest|lowest|biggest|largest|worst|best)\b",
     re.I,
 )
 
 
 def is_numeric_query(claim: str) -> bool:
-    """Return True if the claim appears to ask about statistics or numbers."""
-    return bool(_NUMERIC_QUERY_RE.search(claim))
+    """Return True when the query is about measurable/economic topics.
+
+    Uses domain stems rather than a fixed word list so new phrasings
+    ('depreciation', 'economies', 'malnutrition') are caught automatically.
+    Structural signals alone ('top 10 most wanted') are not enough —
+    a domain stem must also be present.
+    """
+    return bool(_NUMERIC_DOMAIN_RE.search(claim))
 
 
 # ── Niche / entertainment query detection ────────────────────────────────────
@@ -210,3 +242,269 @@ def pipeline_timer(stage: str, log_fn=None):
                        f'{{"stage": "{stage}", "elapsed_ms": {t.elapsed_ms}}}')
             except Exception:
                 pass
+
+
+# ── Fix #14: Entity identity scoring (v3.4) ───────────────────────────────────
+#
+# Problem: semantic embeddings understand "topic similarity" but retrieval
+# needs "event/context identity."  "Duterte ICC" and "Bato dela Rosa ICC" are
+# politically close in embedding space but are different contextual events —
+# different actors, different hearings, different timelines.
+#
+# Solution: extract named entities (proper nouns + key action nouns) from the
+# claim, then score each candidate on:
+#   - OVERLAP BONUS  — entities from the claim that appear in the text
+#   - MISMATCH PENALTY — claim entities that are completely absent from the text
+#
+# The entity score is blended into hybrid_score at call sites via
+# apply_entity_rerank(), keeping semantic similarity dominant but penalising
+# articles whose central actors differ from the claim.
+#
+# Design principles:
+#   - No external NLP dependency (spaCy/NLTK not required).  Uses regex-based
+#     proper-noun extraction: capitalised tokens 4+ chars, not stopwords.
+#   - Penalty is asymmetric: missing entities hurt more than extra ones.
+#     A claim about "Bato" that finds an article mentioning both "Bato" and
+#     "Duterte" should NOT be penalised — the article is still on-topic.
+#   - Weights are kept conservative (entity contributes ≤30% of final score)
+#     so we don't over-filter when entities are legitimately absent (e.g. a
+#     statistical claim where the actor is implied).
+
+# Entity extraction config
+_ENTITY_STOPWORDS = {
+    "The", "This", "That", "These", "Those", "Their", "There",
+    "Which", "Where", "When", "What", "Who", "How", "Why",
+    "Also", "Both", "Such", "More", "Most", "Some", "Many",
+    "Each", "About", "After", "Before", "During", "While",
+    "With", "From", "Into", "Upon", "Over", "Under", "Between",
+    "Senate", "House", "Court", "Law", "Act", "Republic",  # too generic alone
+}
+
+# Action nouns that anchor event identity (match lowercase)
+_EVENT_ANCHOR_RE = re.compile(
+    r"\b(standoff|lockdown|hearing|"
+    r"arrest|arrested|arrests|warrant|warrants|"
+    r"detained|detention|detain|"
+    r"charged|charge|charges|indicted|indictment|"
+    r"jailed|imprisoned|released|"
+    r"shootout|gunshot|gunfire|firing|ambush|raid|operation|manhunt|"
+    r"testimony|appearance|surrender|surrendered|"
+    r"flight|escape|escaped|fled|"
+    r"acquitted|acquittal|convicted|conviction|sentenced|verdict|"
+    r"impeachment|impeached|resignation|resigned|"
+    r"appointment|appointed|confirmation|confirmed|vote|voted|election|elected|"
+    r"shooting|shot|killed|kill|wounded|injured|dead|casualt|attack|attacked|clash|clashed|"
+    r"hike|cut|pause|freeze|policy|ruling|"
+    r"protest|protested|rally|demonstration|crackdown|dispersal|fired|sacked)\b",
+    re.I,
+)
+
+# Weights for entity scoring blend
+_W_ENTITY  = 0.25   # max entity bonus added to hybrid score
+_W_PENALTY = 0.45   # max entity mismatch penalty subtracted
+
+
+def extract_claim_entities(claim: str) -> dict:
+    """
+    Extract named entities and event anchors from a claim string.
+
+    Returns:
+        {
+          "proper_nouns": set of capitalised tokens (person/place names),
+          "event_anchors": set of action/event nouns (lowercase),
+          "all_entities": union of both sets (lowercase for matching),
+        }
+
+    Uses regex only — no spaCy/NLTK required.
+
+    Examples:
+        "Ronald dela Rosa faces ICC arrest warrant after Senate standoff"
+        → proper_nouns: {"Ronald", "Rosa", "Senate", "ICC"}
+        → event_anchors: {"arrest", "standoff"}
+    """
+    # Normalize: if claim is all-lowercase, we need to recover proper nouns.
+    # Strategy: extract event anchors from the raw lowercase claim FIRST (they
+    # are unambiguous via regex), then capitalize only the remaining tokens so
+    # action verbs like "arrested" are never mistaken for person names.
+    # This avoids any hardcoded verb/stopword lists.
+    if claim == claim.lower():
+        # Find which token positions are event anchors (keep lowercase)
+        event_token_set = {m.lower() for m in _EVENT_ANCHOR_RE.findall(claim)}
+        # Also skip generic grammar words
+        _GRAMMAR = {
+            "the", "a", "an", "is", "are", "was", "were", "in", "of", "to",
+            "for", "that", "this", "and", "or", "but", "on", "at", "by",
+            "from", "with", "has", "have", "had", "be", "been", "will",
+            "would", "could", "should", "may", "might", "do", "does", "did",
+            "its", "it", "who", "what", "when", "where", "how", "said",
+            "also", "than", "then", "not", "no", "as", "up", "so", "if",
+            "can", "all", "more", "some", "very", "just", "only",
+        }
+        # Capitalize only tokens that are NOT event anchors and NOT grammar
+        claim = " ".join(
+            w if (w in event_token_set or w in _GRAMMAR) else w.capitalize()
+            for w in claim.split()
+        )
+
+    # Proper nouns: capitalised, 3+ chars, not in stopword list
+    proper_nouns = {
+        tok for tok in re.findall(r"\b[A-Z][a-z]{2,}\b", claim)
+        if tok not in _ENTITY_STOPWORDS
+    }
+    # Also grab all-caps abbreviations (ICC, BSP, DOJ, etc.)
+    proper_nouns |= set(re.findall(r"\b[A-Z]{2,6}\b", claim))
+
+    # Event anchors: key action/event words
+    event_anchors = set(m.lower() for m in _EVENT_ANCHOR_RE.findall(claim))
+
+    all_entities = {e.lower() for e in proper_nouns} | event_anchors
+
+    return {
+        "proper_nouns":  proper_nouns,
+        "event_anchors": event_anchors,
+        "all_entities":  all_entities,
+    }
+
+
+def entity_identity_score(
+    claim_entities: dict,
+    candidate_text: str,
+    candidate_title: str = "",
+) -> float:
+    """
+    Score how well a candidate text matches the claim's entity identity.
+
+    Returns a float in [-1.0, +1.0]:
+      Positive → entities overlap well (same event/context)
+      Zero     → neutral (no entity info to judge)
+      Negative → key claim entities are absent (different event)
+
+    Algorithm:
+      1. Check which claim entities appear in the candidate text + title.
+      2. overlap_ratio = matched / total_claim_entities
+      3. missing_ratio = (central entities missing) / total_claim_entities
+         "Central" = proper nouns (person/org names), not generic event words.
+      4. score = overlap_bonus - mismatch_penalty
+         overlap_bonus  = overlap_ratio         (up to +1.0)
+         mismatch_penalty = missing_ratio * 1.5  (amplified — absence matters more)
+      5. Clamp to [-1.0, +1.0].
+
+    Why asymmetric penalty:
+      An article about "Bato + Duterte + ICC" matching a query about "Bato + ICC"
+      has overlap_ratio=1.0 (all claim entities found) → no penalty, correct.
+      An article about "Duterte + ICC" matching "Bato + ICC" has overlap_ratio=0.5
+      but missing_ratio=0.5 (Bato absent) → penalised, correct.
+    """
+    all_entities   = claim_entities.get("all_entities", set())
+    proper_nouns   = claim_entities.get("proper_nouns", set())
+
+    if not all_entities:
+        return 0.0   # no entity info — neutral, don't penalise
+
+    search_text = (candidate_text + " " + candidate_title).lower()
+
+    import re as _re
+    matched  = sum(
+        1 for e in all_entities
+        if _re.search(r"\b" + _re.escape(e) + r"\b", search_text)
+    )
+    overlap_ratio = matched / len(all_entities)
+
+    # Only proper nouns (person/org names) contribute to mismatch penalty.
+    # Generic event words like "arrest" or "standoff" are too common to penalise on.
+    pn_lower = {e.lower() for e in proper_nouns}
+    if pn_lower:
+        missing_pn     = sum(
+            1 for e in pn_lower
+            if not _re.search(r"\b" + _re.escape(e) + r"\b", search_text)
+        )
+        missing_ratio  = missing_pn / len(pn_lower)
+    else:
+        missing_ratio  = 0.0
+
+    raw = overlap_ratio - (missing_ratio * 1.5)
+    return max(-1.0, min(1.0, raw))
+
+
+def apply_entity_rerank(
+    candidates: list,
+    claim: str,
+    entity_weight: float = _W_ENTITY,
+    penalty_weight: float = _W_PENALTY,
+) -> list:
+    """
+    Apply entity identity scoring as a post-retrieval score adjustment.
+
+    Mutates each candidate dict in-place, adding:
+      "entity_score"    — raw [-1, +1] entity identity score
+      "context_label"   — UI label: "same_event" | "related_topic" | "broad_match"
+
+    Also adjusts "similarity" by blending entity score:
+      new_similarity = original_similarity
+                       + entity_weight  * max(0, entity_score)   ← bonus
+                       - penalty_weight * max(0, -entity_score)  ← penalty
+
+    The blend is additive so existing semantic + trust + recency scoring is
+    preserved. Entity scoring only nudges — it never completely overrides a
+    high-semantic-similarity result.
+
+    Args:
+        candidates:     List of evidence dicts (each has "text", "similarity",
+                        optionally "article_title").
+        claim:          Original claim string.
+        entity_weight:  Max bonus for full entity overlap (default 0.25).
+        penalty_weight: Max penalty for full entity mismatch (default 0.20).
+
+    Returns:
+        Candidates re-sorted by adjusted similarity (descending).
+    """
+    if not candidates or not claim:
+        return candidates
+
+    claim_entities = extract_claim_entities(claim)
+
+    if not claim_entities["all_entities"]:
+        # No extractable entities (e.g. pure numeric/stats claim) — skip
+        for c in candidates:
+            c["entity_score"]  = 0.0
+            c["context_label"] = context_identity_label(c.get("similarity", 0), 0.0)
+        return candidates
+
+    for c in candidates:
+        text  = c.get("text", "")
+        title = c.get("article_title", "") or c.get("title", "")
+        e_score = entity_identity_score(claim_entities, text, title)
+
+        bonus   =  entity_weight  * max(0.0, e_score)
+        penalty =  penalty_weight * max(0.0, -e_score)
+        original = float(c.get("similarity", 0.0))
+        adjusted = max(0.0, min(1.0, original + bonus - penalty))
+
+        c["entity_score"]       = round(e_score, 4)
+        c["similarity_original"] = round(original, 4)
+        c["similarity"]         = round(adjusted, 4)
+        c["context_label"]      = context_identity_label(adjusted, e_score)
+
+    candidates.sort(key=lambda x: x["similarity"], reverse=True)
+    return candidates
+
+
+def context_identity_label(similarity: float, entity_score: float) -> str:
+    """
+    Map (similarity, entity_score) to a 3-tier context identity UI label.
+
+    Tiers:
+      "same_event"    → ✅  High similarity AND entities align
+                            (same actors, same incident)
+      "related_topic" → ⚠   High/medium similarity but entity overlap is partial
+                            (related political topic, adjacent event)
+      "broad_match"   → ❌  Low entity alignment or low similarity
+                            (same broad theme, different story)
+
+    These labels are for UI display only; the similarity score drives ranking.
+    """
+    if similarity >= 0.52 and entity_score >= 0.25:
+        return "same_event"
+    if similarity >= 0.42 and entity_score >= 0.15:
+        return "related_topic"
+    return "broad_match"

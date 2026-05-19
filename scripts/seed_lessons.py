@@ -89,7 +89,7 @@ LESSONS = [
             "When checking content, ask: What is this piece of content trying to make me believe? "
             "Then check whether the evidence actually supports that belief — not just whether "
             "the individual sentences are technically accurate.\n\n"
-            "This is the core of prebunking: understanding how you can be led to a false conclusion "
+            "Understanding how you can be led to a false conclusion "
             "through entirely true statements presented selectively."
         ),
     },

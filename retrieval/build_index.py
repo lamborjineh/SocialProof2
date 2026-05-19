@@ -2,17 +2,6 @@
 retrieval/build_index.py
 Builds BGE-M3 dense embedding indices from the corpus.
 
-v3.3 Changes (fix #13):
-  - date_published is now fetched from the articles table (via a new DB helper)
-    and stored in per-sentence metadata so retriever.py can use actual publish
-    dates for recency decay instead of guessing from URLs.
-
-v3.4 Changes:
-  - PER_DOMAIN_CAP (default 200) applied before encoding so no single domain
-    can flood the index even if the DB contains more rows.
-    nature.com and any other high-volume domain are silently trimmed to cap.
-  - Domain distribution is printed at build time so you can verify balance.
-
 Three separate indices are maintained:
   news / stats / factcheck + combined "all" fallback.
 

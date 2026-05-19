@@ -7,7 +7,7 @@ Converts ComparisonEngine output into a list of lesson triggers with
 the correct difficulty level for the user's current skill progress.
 
 compute_triggers() is the single public entry point.
-It applies the 7 trigger rules from docx §4.1 Step 6:
+It applies trigger rules from docx §4.1 Step 6:
 
   Rule 1 — Skipped claim identification step
   Rule 2 — Rated source differently from system (medium/high confidence)
@@ -16,12 +16,9 @@ It applies the 7 trigger rules from docx §4.1 Step 6:
   Rule 5 — Score diverged by 30+ points from system score
   Rule 6 — High confidence + wrong label (overconfidence)
   Rule 7 — Any re-evaluation requested
-  Rule 8 — behavior_tracker flag: skips_source_check  → Module 8 (Responsible Sharing)
-  Rule 9 — behavior_tracker flag: trusts_emotional     → Module 6 (How Fake News is Made)
-  Rule 10 — behavior_tracker flag: headline_only       → Module 7 (Types of Misinformation)
 
-Called from routers/user_evaluation.py — behavior_tracker.get_behavior_triggers() feeds
-flags into this function via user_eval_data["behavior_flags"].
+Lesson keys are resolved dynamically from the lessons table, so new
+difficulty tiers added by admins are picked up automatically.
 
 Called from routers/user_evaluation.py after ComparisonEngine.compare().
 Results are inserted into lessons_triggered.
@@ -85,7 +82,7 @@ def compute_triggers(
     if missed_claims or "claims" in skipped_steps:
         topic = "claim_detection"
         triggers.append({
-            "lesson_key":     _pick_lesson_key(topic, skill_levels),
+            "lesson_key":     _pick_lesson_key(topic, skill_levels, db_session),
             "trigger_reason": (
                 "You skipped the claim identification step. "
                 "Isolating what is being claimed is the first step in any fact-check."
@@ -97,10 +94,12 @@ def compute_triggers(
     if source_mismatch and confidence in ("medium", "high"):
         topic = "source_verification"
         triggers.append({
-            "lesson_key":     _pick_lesson_key(topic, skill_levels),
+            "lesson_key":     _pick_lesson_key(topic, skill_levels, db_session),
             "trigger_reason": (
                 f"You rated the source as credible (with {confidence} confidence), "
-                "but the system found it to be of low or unknown reliability."
+                "but several credibility signals for this domain — such as MBFC bias "
+                "rating, factual-reporting history, or domain age — suggest caution. "
+                "This lesson helps you build a repeatable source-checking routine."
             ),
             "difficulty":     skill_levels.get(topic, "beginner"),
         })
@@ -109,11 +108,12 @@ def compute_triggers(
     if missed_bias:
         topic = "bias_detection"
         triggers.append({
-            "lesson_key":     _pick_lesson_key(topic, skill_levels),
+            "lesson_key":     _pick_lesson_key(topic, skill_levels, db_session),
             "trigger_reason": (
-                "The system detected significant emotional or manipulative language "
-                "that you did not flag. Recognising emotional language is one of the "
-                "most important media literacy skills."
+                "Linguistic analysis flagged patterns associated with emotional "
+                "or manipulative framing in this content that were not noted during "
+                "your evaluation. Recognising these patterns is one of the most "
+                "important and transferable media literacy skills."
             ),
             "difficulty":     skill_levels.get(topic, "beginner"),
         })
@@ -122,7 +122,7 @@ def compute_triggers(
     if "evidence" in skipped_steps:
         topic = "evidence_evaluation"
         triggers.append({
-            "lesson_key":     _pick_lesson_key(topic, skill_levels),
+            "lesson_key":     _pick_lesson_key(topic, skill_levels, db_session),
             "trigger_reason": (
                 "You skipped the evidence assessment step. "
                 "Checking whether claims are backed by verifiable evidence — "
@@ -136,76 +136,40 @@ def compute_triggers(
         direction = "more lenient" if score_diff > 0 else "more critical"
         topic = "general"
         triggers.append({
-            "lesson_key":     _pick_lesson_key(topic, skill_levels),
+            "lesson_key":     _pick_lesson_key(topic, skill_levels, db_session),
             "trigger_reason": (
-                f"Your credibility score was {abs(score_diff)} points "
-                f"{'higher' if score_diff > 0 else 'lower'} than the system's — "
-                f"you were significantly {direction}. "
-                "This lesson covers calibrated skepticism."
+                f"Your credibility score differed significantly from the "
+                f"evidence-based credibility indicators for this content — "
+                f"you were notably {direction}. "
+                "This lesson covers calibrated skepticism and how to anchor "
+                "your assessment to verifiable signals rather than intuition."
             ),
             "difficulty":     skill_levels.get(topic, "beginner"),
         })
 
-    # ── Rule 6: High confidence + wrong label (overconfidence) ───────────────
+    # ── Rule 6: High confidence + label mismatch (overconfidence signal) ──────
+    # Note: system_label is a pedagogical scaffold, not a ground-truth verdict.
+    # The trigger fires on the pattern (high confidence + low thoroughness),
+    # not to tell the user they were "wrong". The trigger_reason intentionally
+    # does NOT reference the system's conclusion.
     if confidence == "high" and not label_match and user_label is not None:
         topic = "general"
         # Avoid duplicate with Rule 5
         already_added = any(t["lesson_key"].startswith("general_") for t in triggers)
         if not already_added:
             triggers.append({
-                "lesson_key":     "general_overconfidence",
+                "lesson_key":     _pick_lesson_key(topic, skill_levels, db_session),
                 "trigger_reason": (
-                    f"You were highly confident in your verdict ('{user_label}'), "
-                    f"but the system reached a different conclusion ('{system_label}'). "
-                    "High confidence + wrong label is a sign of confirmation bias."
+                    f"You submitted your verdict ('{user_label}') with high confidence "
+                    "but several evaluation steps were skipped or lightly completed. "
+                    "High confidence without thorough checking is a common pattern in "
+                    "confirmation bias — this lesson walks through how to slow down "
+                    "and stress-test your own reasoning."
                 ),
                 "difficulty":     skill_levels.get(topic, "beginner"),
             })
 
     # ── Deduplicate (keep first occurrence per lesson_key) ────────────────────
-    # ── Rule 8: behavior flag — skips_source_check ───────────────────────────
-    # Fired when behavior_tracker detects the user consistently skips source
-    # verification. → Module 8: Responsible Sharing / Pre-Share Check habit.
-    behavior_flags = user_eval_data.get("behavior_flags") or []
-    if "skips_source" in behavior_flags or "skips_source_check" in behavior_flags:
-        topic = "responsible_sharing"
-        triggers.append({
-            "lesson_key":     _pick_lesson_key(topic, skill_levels),
-            "trigger_reason": (
-                "You skipped checking the source. Verifying sources before "
-                "sharing is a core responsible sharing habit — Module 8 covers this."
-            ),
-            "difficulty":     skill_levels.get(topic, "beginner"),
-        })
-
-    # ── Rule 9: behavior flag — trusts_emotional ──────────────────────────────
-    # Fired when behavior_tracker detects the user regularly accepts emotionally
-    # framed content without scrutiny. → Module 6: How Fake News is Made.
-    if "trusts_emotional" in behavior_flags:
-        topic = "fake_news_creation"
-        triggers.append({
-            "lesson_key":     _pick_lesson_key(topic, skill_levels),
-            "trigger_reason": (
-                "Emotionally charged language is a common tactic in fake news. "
-                "Module 6 explains how misleading content is engineered."
-            ),
-            "difficulty":     skill_levels.get(topic, "beginner"),
-        })
-
-    # ── Rule 10: behavior flag — headline_only ────────────────────────────────
-    # Fired when behavior_tracker detects the user judges content based on
-    # the headline alone without reading evidence. → Module 7: Types of Misinformation.
-    if "headline_only" in behavior_flags:
-        topic = "misinformation_types"
-        triggers.append({
-            "lesson_key":     _pick_lesson_key(topic, skill_levels),
-            "trigger_reason": (
-                "Clickbait and misleading headlines are a core misinformation tactic. "
-                "Module 7 explains the different types of mis- and disinformation."
-            ),
-            "difficulty":     skill_levels.get(topic, "beginner"),
-        })
-
     seen: set = set()
     deduped: List[Dict[str, str]] = []
     for t in triggers:
@@ -218,55 +182,41 @@ def compute_triggers(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_TOPIC_LESSON_KEYS = {
-    "claim_detection": {
-        "beginner":     "claim_detection_beginner",
-        "intermediate": "claim_detection_intermediate",
-        "advanced":     "claim_detection_advanced",
-    },
-    "source_verification": {
-        "beginner":     "source_verification_beginner",
-        "intermediate": "source_verification_intermediate",
-        "advanced":     "source_verification_advanced",
-    },
-    "bias_detection": {
-        "beginner":     "bias_detection_beginner",
-        "intermediate": "bias_detection_intermediate",
-        "advanced":     "bias_detection_advanced",
-    },
-    "evidence_evaluation": {
-        "beginner":     "evidence_evaluation_beginner",
-        "intermediate": "evidence_evaluation_intermediate",
-        "advanced":     "evidence_evaluation_advanced",
-    },
-    "general": {
-        "beginner":     "general_mil_beginner",
-        "intermediate": "general_mil_intermediate",
-        "advanced":     "general_mil_advanced",
-    },
-    # v3 — Modules 6/7/8 triggered by behavior_tracker flags
-    "fake_news_creation": {
-        "beginner":     "fake_news_creation_beginner",
-        "intermediate": "fake_news_creation_intermediate",
-        "advanced":     "fake_news_creation_advanced",
-    },
-    "misinformation_types": {
-        "beginner":     "misinformation_types_beginner",
-        "intermediate": "misinformation_types_intermediate",
-        "advanced":     "misinformation_types_advanced",
-    },
-    "responsible_sharing": {
-        "beginner":     "responsible_sharing_beginner",
-        "intermediate": "responsible_sharing_intermediate",
-        "advanced":     "responsible_sharing_advanced",
-    },
-}
+def _pick_lesson_key(
+    topic: str,
+    skill_levels: Dict[str, str],
+    db_session: Optional[Session] = None,
+) -> str:
+    """
+    Return the lesson_key for the user's current skill level in a topic.
 
-
-def _pick_lesson_key(topic: str, skill_levels: Dict[str, str]) -> str:
-    """Return the lesson key for the user's current skill level in a topic."""
+    Looks up the lessons table dynamically so new lessons added by admins
+    are picked up immediately without code changes.  Falls back to the
+    conventional naming pattern (topic_level) if no DB row is found.
+    """
     level = skill_levels.get(topic, "beginner")
-    return _TOPIC_LESSON_KEYS.get(topic, {}).get(level, f"{topic}_beginner")
+    fallback = f"{topic}_{level}"
+
+    if db_session is None:
+        return fallback
+
+    try:
+        row = db_session.execute(
+            sa.text(
+                "SELECT lesson_key FROM lessons "
+                "WHERE topic = :topic AND difficulty = :level "
+                "  AND is_published = 1 "
+                "ORDER BY sort_order ASC, id ASC "
+                "LIMIT 1"
+            ),
+            {"topic": topic, "level": level},
+        ).fetchone()
+        if row:
+            return row.lesson_key
+    except Exception:
+        pass
+
+    return fallback
 
 
 def _get_skill_levels(
@@ -302,3 +252,4 @@ def _get_skill_levels(
         pass  # Return defaults if table doesn't exist yet
 
     return defaults
+

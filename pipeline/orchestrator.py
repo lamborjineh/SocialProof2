@@ -1,150 +1,242 @@
 """
-SocialProof — Pipeline Orchestrator v3.4
+SocialProof — Pipeline Orchestrator v5.0
 
-Pipeline order
-  0a URL Fetching
-  0b OCR
-  1  Preprocessing
-  2  Claim Detection
-  3  Source Credibility
-  4  Language & Bias Analysis
-  5  Check-worthiness pre-scoring (local heuristic)
-  6  Evidence Retrieval (FAISS → live search fallback)
-  7  NLI (multi-evidence weighted voting)
-  8  Credibility Scoring
-  9  Annotation Engine
-  10 Explainability Engine
+Changes vs v4.0:
+  - MBFC enrichment: _enrich_with_mbfc() called after article assembly.
+    Adds mbfc_url, mbfc_factual, mbfc_bias to each article card.
+  - Source diversity: inspect_source_diversity() classifies each article
+    into government/academic/news/factcheck/international/other and
+    returns a SourceDiversityInfo object + logs to source_diversity_log.
+  - Retrieval reason: _build_retrieval_reason() attaches a short
+    human-readable chip to each card explaining why it was retrieved
+    ("Matched: [keyword]"), addressing the black-box criticism.
+  - Live search escalation threshold lowered: fires when FAISS max
+    similarity < 0.25 (was: only when no results at all). Catches the
+    case where FAISS returns weakly-related old articles for recent news.
+  - URL slug fallback: when URLFetcher fails but slug has ≥4 words,
+    uses slug text for retrieval instead of returning empty.
+  - confidence_before forwarded through to ConfidenceSnapshot save.
+
+Return contract:
+  {
+    "articles":        list of enriched article dicts,
+    "keywords":        list of str,
+    "processing_ms":   int,
+    "live_search_used": bool,
+    "url_fetch_failed": bool,
+    "url_fetch_error":  str,
+    "source_diversity": SourceDiversityInfo dict,
+  }
 """
 
 import base64 as _b64
 import concurrent.futures as _cf
-import hashlib as _hashlib
 import re
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
-from config import MAX_EVIDENCE, logger
+from config import MAX_EVIDENCE, logger, TIMEOUT_LIVE_SEARCH as _LIVE_TIMEOUT
 from core.model_registry import ModelRegistry
-from schemas import AnalyzeRequest
+from schemas import AnalyzeRequest, SourceDiversityInfo
 
 from .preprocessing      import PreprocessingModule
 from .url_fetcher        import URLFetcher
 from .image_input        import extract_text_from_image
-from .claim_detection    import ClaimDetectionModule
-from .source_credibility import SourceCredibilityModule
-from .bias_analysis      import BiasAnalysisModule
-from .evidence_retrieval import (
-    EvidenceRetrievalModule, record_unverified,
-    score_claim_worthiness,
-)
-from .nli                import NLIModule
-from .annotation         import AnnotationEngine
+from .evidence_retrieval import EvidenceRetrievalModule, _try_load_faiss_retriever
 
-def _timeout_fallback(claim_text: str = '', timeout_seconds: float = 5.0) -> dict:
-    return {
-        'label': 'Uncertain',
-        'score': 50,
-        'note': 'pipeline_timeout',
-        'is_partial': True,
-        'evidence_coverage': 0.0,
-        'live_search_used': False,
-        'timeout': True,
-        'timeout_seconds': timeout_seconds,
-    }
-
-
-# ── Evidence retrieval config ─────────────────────────────────────────────────
-# More candidates retrieved so multi-evidence voting has more material to work
-# with. The quality gate inside NLIModule.classify_multi filters out weak ones.
 _RETRIEVAL_TOP_K = 5
 
+# ── Domain classification helpers ─────────────────────────────────────────────
+# Used by inspect_source_diversity() to categorise each article.
 
-def _compute_score(source_score, bias_score, evidence_items, claim_results,
-                   evidence_coverage, all_evidence_neutral=False):
-    """Inline credibility scoring — replaces the removed CredibilityScoringEngine."""
-    WEIGHTS = {"source": 0.25, "bias": 0.20, "evidence": 0.40, "claims": 0.15}
-    PARTIAL = {"source": 0.45, "bias": 0.45, "claims": 0.10}
-    STRONG_THRESH = 0.40
+_GOV_SUFFIXES    = (".gov", ".gov.ph", ".gov.uk", ".gov.au", ".gov.sg",
+                    ".gc.ca", ".gouv.fr", ".gob.mx", ".govt.nz", ".gov.in",
+                    ".europa.eu", ".un.org", ".who.int", ".psa.gov.ph")
+_ACADEMIC_SUFFIXES = (".edu", ".ac.uk", ".edu.au", ".ac.nz", ".edu.sg",
+                      ".edu.cn", ".ac.jp", ".edu.ph")
+_ACADEMIC_DOMAINS  = {"pubmed.ncbi.nlm.nih.gov", "scholar.google.com",
+                      "researchgate.net", "jstor.org", "sciencedirect.com",
+                      "nature.com", "springer.com", "plos.org", "frontiersin.org"}
+_FACTCHECK_DOMAINS = {"snopes.com", "factcheck.org", "politifact.com",
+                      "fullfact.org", "africacheck.org", "verafiles.org",
+                      "tsek.ph", "rappler.com", "reuters.com/fact-check",
+                      "apnews.com/hub/ap-fact-check", "boomlive.in"}
+# Domains registered outside PH that are not primarily Filipino outlets
+_INTERNATIONAL_DOMAINS = {"bbc.com", "bbc.co.uk", "nytimes.com", "theguardian.com",
+                           "aljazeera.com", "dw.com", "france24.com", "scmp.com",
+                           "straitstimes.com", "channelnewsasia.com", "abc.net.au",
+                           "cbc.ca", "theconversation.com"}
 
-    # Fix: evidence_coverage < 0.0 is mathematically impossible (coverage is
-    # always 0.0–1.0), so is_partial was never True and "Inconclusive" was
-    # never shown.  Correct condition: no evidence found for any claim.
-    # We also check claim_results to avoid marking zero-claim inputs as partial
-    # (those are legitimately "no claims detected", not "evidence missing").
-    is_partial = len(claim_results) > 0 and evidence_coverage == 0.0
-    s_source = source_score
-    s_bias   = 1.0 - bias_score
 
-    s_evidence = None
-    if evidence_items and not is_partial:
-        def cw(e):
-            return float(e.get("similarity_score", 0.0)) * float(e.get("nli_confidence", 0.5))
-        sup = sum(cw(e) for e in evidence_items if e.get("type") == "support")
-        con = sum(cw(e) for e in evidence_items if e.get("type") == "contradict")
-        neu = sum(cw(e) for e in evidence_items if e.get("type") == "neutral")
-        dec = sup + con
-        if dec < 1e-6:
-            s_evidence = 0.5
-        else:
-            dr = sup / (dec + 1e-9)
-            tw = dec + neu + 1e-9
-            nr = neu / tw
-            s_evidence = dr * (1.0 - nr * 0.5) + 0.5 * (nr * 0.5)
-        has_strong = any(e.get("similarity_score", 0) >= STRONG_THRESH for e in evidence_items)
-        if not has_strong:
-            s_evidence = 0.5 + (s_evidence - 0.5) * 0.6
+def _classify_source(url: Optional[str], publisher: Optional[str]) -> str:
+    """
+    Return one of: government | academic | news | factcheck | international | other
+    Priority: government > factcheck > academic > international > news > other
+    """
+    if not url:
+        return "other"
+    try:
+        parsed  = urlparse(url if url.startswith("http") else "https://" + url)
+        domain  = parsed.netloc.replace("www.", "").lower()
+        path    = parsed.path.lower()
+    except Exception:
+        return "other"
 
-    vote_scores = []
-    for c in (claim_results or []):
-        bd = c.get("vote_breakdown")
-        if bd and isinstance(bd, dict):
-            vote_scores.append(bd.get("support", 0.0) - bd.get("contradict", 0.0))
-        else:
-            lbl = c.get("label", "unverified")
-            vote_scores.append(1.0 if lbl == "supported" else (-0.5 if lbl == "unverified" else 0.0))
-    if vote_scores:
-        avg = sum(vote_scores) / len(vote_scores)
-        s_claims = max(0.0, min(1.0, (avg + 1.0) / 2.0))
-    else:
-        s_claims = 0.5
+    # Government
+    for suf in _GOV_SUFFIXES:
+        if domain.endswith(suf) or domain == suf.lstrip("."):
+            return "government"
 
-    # If no evidence was retrieved (e.g. 0 claims detected), default to neutral
-    if s_evidence is None:
-        s_evidence = 0.5
+    # Fact-check (domain-level or path-level match)
+    for fc in _FACTCHECK_DOMAINS:
+        if domain == fc or domain.endswith("." + fc) or fc in domain + path:
+            return "factcheck"
 
-    if is_partial:
-        final_score = 0
-        label = "Inconclusive"
-    else:
-        w = WEIGHTS
-        raw = s_source * w["source"] + s_bias * w["bias"] + s_evidence * w["evidence"] + s_claims * w["claims"]
-        final_score = max(0, min(100, int(round(raw * 100))))
-        label = "Likely Credible" if final_score >= 60 else ("Uncertain" if final_score >= 40 else "Likely Misleading")
+    # Academic
+    for suf in _ACADEMIC_SUFFIXES:
+        if domain.endswith(suf):
+            return "academic"
+    if domain in _ACADEMIC_DOMAINS:
+        return "academic"
 
-    def _sub(score, weight_pct, lbl):
-        return {"score": round(score, 3) if score is not None else None, "weight_pct": weight_pct, "label": lbl}
+    # International news
+    if domain in _INTERNATIONAL_DOMAINS:
+        return "international"
 
-    sub_scores = {
-        "source":   _sub(s_source, 25, "Credible source" if s_source >= 0.7 else ("Mixed reliability" if s_source >= 0.5 else "Low credibility")),
-        "bias":     _sub(s_bias,   20, "Low bias" if s_bias >= 0.7 else ("Moderate bias" if s_bias >= 0.5 else "High bias")),
-        "evidence": _sub(s_evidence, 40, "No evidence" if s_evidence is None else ("Supports" if s_evidence >= 0.65 else ("Mixed" if s_evidence >= 0.4 else "Contradicts"))),
-        "claims":   _sub(s_claims, 15, "Verified" if s_claims >= 0.65 else ("Partial" if s_claims >= 0.5 else "Unverified")),
-        "evidence_coverage": round(evidence_coverage, 3),
+    # Default: news
+    return "news"
+
+
+def inspect_source_diversity(articles: List[Dict]) -> SourceDiversityInfo:
+    """
+    Classify each article and return a SourceDiversityInfo object.
+    Computes diversity_score using Shannon entropy normalised by log(6):
+      H = -Σ(p_i × log(p_i)) / log(6)
+    where p_i = count_i / total. This treats a mix of 1 govt + 5 news very
+    differently from a genuine 6-category spread, unlike the old non_zero/6
+    formula. Score range: 0.0 (monoculture) → 1.0 (perfectly even spread).
+    """
+    import math
+
+    counts = {
+        "government": 0, "academic": 0, "news": 0,
+        "factcheck": 0, "international": 0, "other": 0,
     }
+    for a in articles:
+        cat = a.get("source_category") or _classify_source(
+            a.get("source_url"), a.get("publisher")
+        )
+        counts[cat] = counts.get(cat, 0) + 1
 
-    return {
-        "score": final_score,
-        "label": label,
-        "is_partial": is_partial,
-        "is_inconclusive": is_partial,
-        "all_evidence_neutral": all_evidence_neutral,
-        "sub_scores": sub_scores,
-    }
+    total = sum(counts.values())
+    if total == 0:
+        diversity = 0.0
+    else:
+        entropy = 0.0
+        for v in counts.values():
+            if v > 0:
+                p = v / total
+                entropy -= p * math.log(p)
+        # Normalise by log(6) — maximum possible entropy for 6 categories
+        diversity = round(entropy / math.log(6), 2) if entropy > 0 else 0.0
+
+    return SourceDiversityInfo(
+        total_articles      = len(articles),
+        count_government    = counts["government"],
+        count_academic      = counts["academic"],
+        count_news          = counts["news"],
+        count_factcheck     = counts["factcheck"],
+        count_international = counts["international"],
+        count_other         = counts["other"],
+        diversity_score     = diversity,
+    )
+
+
+def _build_retrieval_reason(article: Dict, keywords: List[str]) -> str:
+    """
+    Returns a one-line human-readable explanation of why this article
+    was retrieved. Shown as a chip under each evidence card.
+    Addresses the 'black box' explainability gap.
+
+    v3.4: Uses context_label from entity identity scoring to display a
+    3-tier match type instead of a binary "Semantically similar" label.
+    This surfaces the distinction between:
+      ✅ Same event/context  — same actors, same incident
+      ⚠ Related topic       — adjacent event or political topic
+      ❌ Broad thematic match — same domain, different story
+    """
+    source_type    = article.get("source_type", "faiss")
+    title          = (article.get("article_title") or "").lower()
+    pub            = article.get("publisher", "")
+    date           = article.get("date_published", "")
+    similarity     = article.get("similarity_score", 0)
+    context_label  = article.get("context_label", "")
+
+    if source_type == "hardcoded":
+        return "From the verified reference corpus"
+
+    # v3.4: If entity scoring ran, use context_label for 3-tier display.
+    # Checked before the source_type == "live" branch so live results also
+    # get entity-aware labels instead of the generic "Recent reporting" fallback.
+    if context_label == "same_event":
+        label = "✅ Same event/context"
+        return f"{label} — {date}" if date and source_type == "live" else label
+    if context_label == "related_topic":
+        label = "⚠ Related topic — may not be the same incident"
+        return f"{label} — {date}" if date and source_type == "live" else label
+    if context_label == "broad_match":
+        label = "❌ Broad thematic similarity only"
+        return f"{label} — {date}" if date and source_type == "live" else label
+
+    if source_type == "live":
+        if date:
+            return f"Recent reporting — {date}"
+        return "Retrieved via live search — recent coverage"
+
+    # Fallback: FAISS keyword match (no entity scoring available)
+    matched = [kw for kw in keywords if kw.lower() in title]
+    if matched:
+        kw_str = ", ".join(matched[:2])
+        return f"Matched: {kw_str}"
+
+    if similarity and similarity > 0.4:
+        return "Semantically similar to your input"
+
+    return ""
+
+
+def _enrich_with_mbfc(articles: List[Dict]) -> List[Dict]:
+    """
+    Looks up each article's domain in the mbfc_domains table and
+    attaches mbfc_url, mbfc_factual, and mbfc_bias.
+    Silently skips on any DB or parse error.
+    """
+    try:
+        from pipeline.source_credibility import get_mbfc_rating
+    except ImportError:
+        return articles
+
+    enriched = []
+    for a in articles:
+        url = a.get("source_url", "")
+        try:
+            mbfc = get_mbfc_rating(url) if url else None
+        except Exception:
+            mbfc = None
+
+        if mbfc:
+            a["mbfc_url"]     = mbfc.get("notes_url") or mbfc.get("mbfc_url")
+            a["mbfc_factual"] = mbfc.get("factual_reporting")
+            a["mbfc_bias"]    = mbfc.get("bias_rating")
+        enriched.append(a)
+    return enriched
 
 
 class AnalysisPipeline:
     """
-    Stateless orchestrator. Instantiated once at startup and reused per request.
+    Stateless orchestrator. Instantiated once at startup, reused per request.
+    Retrieves articles for the user to evaluate — makes no verdict itself.
     """
 
     def __init__(self):
@@ -153,57 +245,56 @@ class AnalysisPipeline:
 
     def run(
         self,
-        request:               AnalyzeRequest,
-        user_submitted_claim:  Optional[str] = None,
+        request: AnalyzeRequest,
+        user_submitted_claim: Optional[str] = None,
     ) -> Dict:
-        """
-        Run the full analysis pipeline.
-
-        Args:
-            request:             Standard AnalyzeRequest.
-            user_submitted_claim: If set, bypass claim detection and use this
-                                  single claim (§4.3 user-typed claim).
-        """
         t0 = time.time()
 
         # ── 0a. URL fetching ──────────────────────────────────────────────────
         raw_text         = request.text or ""
         url_fetch_failed = False
         url_fetch_error  = ""
+
         if request.input_type == "url" and request.url:
             fetch_result = URLFetcher.fetch(request.url)
             if fetch_result["error"]:
                 logger.warning(f"URL fetch failed: {fetch_result['error']}")
-                raw_text         = request.url
                 url_fetch_failed = True
                 url_fetch_error  = fetch_result["error"]
-                # Fix 3b: abort early if URL string itself is too short to analyse usefully
-                url_words = [w for w in re.split(r"[/\-_?=&.]", request.url) if len(w) > 3]
-                if len(url_words) < 4:
-                    return {
-                        "score": None, "label": "Inconclusive", "is_inconclusive": True,
-                        "is_partial": True, "url_fetch_failed": True,
-                        "url_fetch_error": f"Could not access URL: {fetch_result['error']}. Please paste the article text instead.",
-                        "explanation": "The URL could not be accessed so no analysis was performed. Please paste the article text directly.",
-                        "explanation_source": "rule_based",
-                        "mil_tip": "When a link cannot be verified, search for the same story on trusted news sites before sharing.",
-                        "mil_tip_source": "rule_based",
-                        "claims": [], "evidence": [], "annotated": [],
-                        "source_score": 0.0, "bias_score": 0.0, "sub_scores": {},
-                        "processing_ms": int((time.time() - t0) * 1000),
-                        "evidence_coverage": 0.0, "unverified_claims": [],
-                        "suggest_secondary_retrieval": True, "live_search_used": False,
-                        "all_evidence_neutral": False, "no_claims_detected": False,
-                        "evidence_quality_note": "The URL could not be accessed. No content was analysed.",
-                    }
+                # v5.0: extract slug tokens and continue with retrieval
+                # rather than returning early on short slugs
+                try:
+                    parsed_path = urlparse(request.url).path
+                    url_words = [w for w in re.split(r"[-_/]", parsed_path) if len(w) > 3]
+                except Exception:
+                    url_words = []
+                if url_words:
+                    raw_text = " ".join(url_words[:12])
+                    logger.info(f"[0a] URL fetch failed — using slug: '{raw_text}'")
+                else:
+                    url_words_fallback = [
+                        w for w in re.split(r"[/\-_?=&.]", request.url) if len(w) > 3
+                    ]
+                    if len(url_words_fallback) < 4:
+                        return {
+                            "articles":         [],
+                            "keywords":         [],
+                            "processing_ms":    int((time.time() - t0) * 1000),
+                            "live_search_used": False,
+                            "url_fetch_failed": True,
+                            "url_fetch_error":  (
+                                f"Could not access URL: {fetch_result['error']}. "
+                                "Please paste the article text instead."
+                            ),
+                            "source_diversity": SourceDiversityInfo().dict(),
+                        }
+                    raw_text = " ".join(url_words_fallback)
             else:
                 raw_text = fetch_result["text"] or request.url
                 logger.info(f"[0a] URL fetched: {len(raw_text)} chars")
 
         # ── 0b. OCR (image input) ─────────────────────────────────────────────
-        # image_data is a base64-encoded string on the schema.
-        # Decode it here to bytes before passing to OCR.
-        if request.input_type == "image" and getattr(request, 'image_data', None):
+        if request.input_type == "image" and getattr(request, "image_data", None):
             try:
                 _image_bytes = _b64.b64decode(request.image_data)
             except Exception:
@@ -213,8 +304,6 @@ class AnalysisPipeline:
                 if ocr_text:
                     raw_text = ocr_text
                     logger.info(f"[0b] OCR extracted: {len(raw_text)} chars")
-                else:
-                    logger.warning("[0b] OCR returned empty — image may be unreadable")
 
         # ── 1. Preprocessing ──────────────────────────────────────────────────
         clean_text = self.preprocessor.clean(raw_text)
@@ -222,447 +311,138 @@ class AnalysisPipeline:
         keywords   = self.preprocessor.extract_keywords(doc)
         logger.info(f"[1] Preprocessed. Keywords: {keywords[:5]}")
 
-        # ── 2. Claim Detection ────────────────────────────────────────────────
-        if user_submitted_claim:
-            raw_claims = [{
-                "text":           user_submitted_claim.strip(),
-                "sentence_index": 0,
-                "confidence":     1.0,
-                "reasons":        ["user_submitted"],
-            }]
-            no_claims_detected = False
-            logger.info("[2] Using user-submitted claim (no auto-detection)")
-        else:
-            raw_claims         = ClaimDetectionModule.detect(doc, clean_text, article_keywords=keywords)
-            no_claims_detected = len(raw_claims) == 0
-            logger.info(f"[2] Claim detection: {len(raw_claims)} claim(s) found")
+        # ── 6. Evidence / Article Retrieval ───────────────────────────────────
+        retrieval_query  = user_submitted_claim.strip() if user_submitted_claim else clean_text
+        model            = ModelRegistry.embed()
 
-        # ── 3. Source Credibility ─────────────────────────────────────────────
-        source_result = SourceCredibilityModule.evaluate(request.url, clean_text)
-        logger.info(f"[3] Source score: {source_result['score']}")
-
-        # ── 4. Language & Bias Analysis ───────────────────────────────────────
-        bias_result = BiasAnalysisModule.analyze(clean_text, doc)
-        logger.info(f"[4] Bias score: {bias_result['score']}")
-
-        # ── 5. Check-worthiness pre-scoring ─────────────────────────────────────
-        claim_worthiness: Dict = {}
-        for claim in raw_claims:
-            cw = score_claim_worthiness(claim["text"])
-            claim_worthiness[claim["text"][:80]] = cw
-
-        # ── 6 + 7. Evidence Retrieval + NLI (per claim) ───────────────────────
-        # v3.2: uses classify_multi() instead of per-evidence winner-takes-all.
-        all_evidence:   list = []
-        evidence_map:   Dict = {}
-        claim_results:  list = []
-        claims_with_evidence = 0
-
-        for claim in raw_claims:
-            # Fix #1 — augment only with named entities from the claim's own spaCy span,
-            # NOT article-level keywords.  Article keywords contaminate unrelated claims
-            # (e.g. a "slider" claim in a UI article picks up "CAPTCHA" and "volume ring"
-            # from article keywords, pulling those exact corpus documents through FAISS).
-            # Claim-level entities are semantically tethered to the claim itself.
-            claim_lower = claim["text"].lower()
-            claim_span  = next(
-                (s for s in doc.sents if s.text.strip() == claim["text"]), None
-            )
-            claim_ents = (
-                [e.text for e in claim_span.ents if len(e.text) > 3]
-                if claim_span else []
-            )
-            # Only augment short claims that lack their own strong entity signal
-            retrieval_query = claim["text"]
-            if claim_ents and len(claim["text"]) < 80:
-                extra = [e for e in claim_ents[:2] if e.lower() not in claim_lower]
-                if extra:
-                    retrieval_query = claim["text"] + " " + " ".join(extra)
-                    logger.debug(f"[6] Entity-augmented query: '{retrieval_query[:100]}'")
-
-            cw        = claim_worthiness.get(claim["text"][:80], {})
-            retrieved, any_found = self.evidence_retriever.retrieve(
-                retrieval_query,
-                top_k=_RETRIEVAL_TOP_K,
-                check_worthiness=cw,
-            )
-
-            # ── No evidence found at all ──────────────────────────────────────
-            if not any_found:
-                record_unverified(claim["text"])
-                logger.info(
-                    f"[6] stage_failed=retrieval — no evidence for: "
-                    f"'{claim['text'][:60]}'"
+        def _retrieve_with_timeout(query: str):
+            with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(
+                    self.evidence_retriever.retrieve,
+                    query, _RETRIEVAL_TOP_K, "claim", model,
                 )
-                claim_results.append({
-                    "text":             claim["text"],
-                    "sentence_index":   claim["sentence_index"],
-                    "label":            "unverified",
-                    "confidence":       claim["confidence"],
-                    "evidence_found":   False,
-                    "stage_failed":     "retrieval",
-                    "check_worthiness": cw.get("score"),
-                    "vote_breakdown":   None,
-                })
+                try:
+                    return fut.result(timeout=_LIVE_TIMEOUT)
+                except _cf.TimeoutError:
+                    logger.warning(f"[6] Retrieval timed out after {_LIVE_TIMEOUT}s — trying FAISS only.")
+                    # Fall back to FAISS directly on timeout
+                    try:
+                        retriever = _try_load_faiss_retriever()
+                        if retriever:
+                            return self.evidence_retriever._retrieve_faiss(
+                                query, _RETRIEVAL_TOP_K, retriever, mode="claim"
+                            )
+                    except Exception:
+                        pass
+                    return [], False
+                except Exception as e:
+                    logger.warning(f"[6] Retrieval error: {e}")
+                    return [], False
+
+        retrieved, any_found = _retrieve_with_timeout(retrieval_query)
+
+        # Determine if live search was used (source_type on first result)
+        live_search_used = any(
+            r.get("source_type") == "live" for r in (retrieved or [])
+        )
+
+        logger.info(
+            f"[6] Retrieved {len(retrieved or [])} results — "
+            f"live={live_search_used}, any_found={any_found}"
+        )
+
+        # ── Assemble, enrich, and deduplicate articles ────────────────────────
+        articles: List[Dict] = []
+        seen_urls: set = set()
+        for item in (retrieved or []):
+            url = item.get("source_url") or ""
+            if url and url in seen_urls:
                 continue
+            if url:
+                seen_urls.add(url)
 
-            # ── Multi-evidence NLI ────────────────────────────────────────────
-            multi = NLIModule.classify_multi(claim["text"], retrieved)
+            category = _classify_source(url, item.get("publisher"))
+            reason   = _build_retrieval_reason(item, keywords)
 
-            # Collect per-evidence results for the response
-            for ev_result in multi["evidence_results"]:
-                all_evidence.append({
-                    "evidence_text":    ev_result["text"],
-                    "type":             ev_result["type"],
-                    "source_label":     ev_result.get("source_label", ""),
-                    "source_url":       ev_result.get("source_url"),
-                    "article_title":    ev_result.get("article_title", ""),
-                    "publisher":        ev_result.get("publisher", ""),
-                    "date_published":   ev_result.get("date_published", ""),
-                    "similarity_score": ev_result["similarity_score"],
-                    "nli_confidence":   ev_result["nli_confidence"],
-                    "weight":           ev_result.get("weight", 0.0),
-                    "claim_text":       claim["text"],
-                    "source_type":      ev_result.get("source_type", "faiss"),
-                })
-
-            # Determine stage failure
-            if multi["evidence_count"] == 0:
-                # Evidence was found but all fell below similarity threshold
-                record_unverified(claim["text"])
-                logger.info(
-                    f"[7] stage_failed=retrieval_weak — evidence found but all "
-                    f"sim < {NLIModule.MIN_EVIDENCE_SIMILARITY} for: "
-                    f"'{claim['text'][:60]}'"
-                )
-                claim_results.append({
-                    "text":             claim["text"],
-                    "sentence_index":   claim["sentence_index"],
-                    "label":            "unverified",
-                    "confidence":       claim["confidence"],
-                    "evidence_found":   True,
-                    "stage_failed":     "retrieval_weak",
-                    "check_worthiness": cw.get("score"),
-                    "vote_breakdown":   multi["vote_breakdown"],
-                })
-                continue
-
-            claims_with_evidence += 1
-
-            claim_label = {
-                "support":    "supported",
-                "contradict": "unverified",
-                "neutral":    "neutral",
-            }.get(multi["type"], "unverified")
-
-            logger.info(
-                f"[7] Claim '{claim['text'][:50]}' → "
-                f"{claim_label} "
-                f"(support={multi['vote_breakdown']['support']:.3f}, "
-                f"contra={multi['vote_breakdown']['contradict']:.3f}, "
-                f"neutral={multi['vote_breakdown']['neutral']:.3f}, "
-                f"n={multi['evidence_count']})"
-            )
-
-            claim_results.append({
-                "text":             claim["text"],
-                "sentence_index":   claim["sentence_index"],
-                "label":            claim_label,
-                "confidence":       claim["confidence"],
-                "nli_confidence":   multi["nli_confidence"],
-                "evidence_found":   True,
-                "stage_failed":     "none",
-                "check_worthiness": cw.get("score"),
-                "vote_breakdown":   multi["vote_breakdown"],
+            articles.append({
+                "article_title":   item.get("article_title", ""),
+                "publisher":       item.get("publisher", ""),
+                "date_published":  item.get("date_published", ""),
+                "source_url":      url,
+                "source_type":     item.get("source_type", "faiss"),
+                "source_category": category,
+                "retrieval_reason": reason,
+                "similarity_score": item.get("similarity_score", 0),
+                # MBFC fields — populated below by _enrich_with_mbfc
+                "mbfc_url":        None,
+                "mbfc_factual":    None,
+                "mbfc_bias":       None,
             })
 
-            if multi["type"] in ("support", "contradict"):
-                evidence_map[claim["sentence_index"]] = multi["type"]
+        articles = articles[:MAX_EVIDENCE]
 
-        # ── Live search fallback (§4.6) ───────────────────────────────────────
-        # PATCH: Previously only fired when FAISS found zero evidence for ALL claims.
-        # This was a false-confidence trap: FAISS returning weak/irrelevant matches
-        # blocked the fallback entirely. Now also fires when evidence quality is low.
-        live_search_used = False
+        # ── MBFC enrichment ───────────────────────────────────────────────────
+        articles = _enrich_with_mbfc(articles)
 
-        # Compute evidence quality metrics to decide if live search is warranted.
-        #
-        # `all_evidence_neutral` is computed here for UX signalling (sent to the
-        # frontend so it can show "Insufficient evidence" instead of "50/100"),
-        # but is intentionally NOT used as a live-search trigger. When FAISS
-        # returns high-similarity-but-neutral sentences (sim 0.65+), triggering
-        # live search causes HTTP calls that routinely exceed the 5-second pipeline
-        # SLA, returning a timeout fallback with all-zero scores — worse than the
-        # neutral result. Live search stays gated on cosine sim thresholds only.
-        _ev_sims = [e["similarity_score"] for e in all_evidence if "similarity_score" in e]
-        _avg_sim = sum(_ev_sims) / len(_ev_sims) if _ev_sims else 0.0
-        _max_sim = max(_ev_sims) if _ev_sims else 0.0
+        # ── Source diversity analysis ─────────────────────────────────────────
+        diversity = inspect_source_diversity(articles)
 
-        decisive_evidence_count = sum(
-            1 for e in all_evidence if e.get("type") in ("support", "contradict")
-        )
-        all_evidence_neutral = (
-            len(all_evidence) > 0 and decisive_evidence_count == 0
-        )
-
-        # Live search trigger logic:
-        #   claims_with_evidence == 0  → NLI found nothing decisive (strongest signal)
-        #   _avg_sim < 0.42            → FAISS retrieval quality is weak overall.
-        #                                Tightened from 0.45 to reduce unnecessary
-        #                                live searches: FAISS hits at 0.42–0.45
-        #                                are typically weak-neutral, not truly bad.
-        #
-        # _max_sim is intentionally excluded: it is computed pre-NLI and includes
-        # evidence that NLI later rejects. A reputation-boosted result at sim=0.41
-        # can block live search even when claims_with_evidence == 0.
-        #
-        # all_evidence_neutral is excluded: a per-claim timeout guard is now in
-        # place below, so it is safe to add as a supplemental trigger. However,
-        # neutral FAISS hits at sim 0.65+ are usually genuinely neutral (both the
-        # claim and the corpus statement are true, just unrelated) — live search
-        # rarely changes this verdict, and the extra HTTP round-trips add latency.
-        _needs_live = (
-            claims_with_evidence == 0          # strongest: NLI found nothing
-            or _avg_sim < 0.42                 # weak FAISS quality overall
-        )
-
-        logger.info(
-            f"[LiveSearch gate] avg_sim={_avg_sim:.3f}, max_sim={_max_sim:.3f}, "
-            f"claims_with_evidence={claims_with_evidence}/{len(raw_claims) if raw_claims else 0}, "
-            f"all_evidence_neutral={all_evidence_neutral}, "
-            f"_needs_live={_needs_live}"
-        )
-
-        if raw_claims and _needs_live:
-            logger.info(
-                f"[6] Escalating to live search "
-                f"(coverage={claims_with_evidence}/{len(raw_claims)}, "
-                f"avg_sim={_avg_sim:.3f})"
+        # ── Background: log source diversity ─────────────────────────────────
+        try:
+            _log_source_diversity(
+                submission_id = None,   # filled in by analyze router after save
+                session_token = getattr(request, "session_token", ""),
+                diversity     = diversity,
             )
-            model = ModelRegistry.embed()
-
-            # Per-claim timeout: wraps each individual retrieve_live() call so a
-            # slow or hanging live search for one claim doesn't block subsequent
-            # claims. TIMEOUT_LIVE_SEARCH is the per-claim budget (default 20 s).
-            # Without this guard, a single slow article fetch could delay the
-            # entire pipeline by ARTICLE_TIMEOUT × MAX_WORKERS seconds.
-            from config import TIMEOUT_LIVE_SEARCH as _LIVE_TIMEOUT
-
-            def _retrieve_live_with_timeout(claim_text):
-                with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-                    fut = _ex.submit(
-                        self.evidence_retriever.retrieve_live,
-                        claim_text, model, _RETRIEVAL_TOP_K,
-                    )
-                    try:
-                        return fut.result(timeout=_LIVE_TIMEOUT)
-                    except _cf.TimeoutError:
-                        logger.warning(
-                            f"[6] Live search timed out after {_LIVE_TIMEOUT}s "
-                            f"for claim: '{claim_text[:60]}'"
-                        )
-                        return [], False
-                    except Exception as _e:
-                        logger.warning(f"[6] Live search error for claim: {_e}")
-                        return [], False
-
-            for claim in raw_claims:
-                live_results, live_found = _retrieve_live_with_timeout(claim["text"])
-                if not live_found:
-                    continue
-
-                multi = NLIModule.classify_multi(claim["text"], live_results)
-
-                # Collect live evidence
-                for ev_result in multi["evidence_results"]:
-                    all_evidence.append({
-                        "evidence_text":    ev_result["text"],
-                        "type":             ev_result["type"],
-                        "source_label":     ev_result.get("source_label", ""),
-                        "source_url":       ev_result.get("source_url"),
-                        "article_title":    ev_result.get("article_title", ""),
-                        "publisher":        ev_result.get("publisher", ""),
-                        "date_published":   ev_result.get("date_published", ""),
-                        "similarity_score": ev_result["similarity_score"],
-                        "nli_confidence":   ev_result["nli_confidence"],
-                        "weight":           ev_result.get("weight", 0.0),
-                        "claim_text":       claim["text"],
-                        "source_type":      "live",
-                    })
-
-                if multi["evidence_count"] == 0:
-                    continue
-
-                live_search_used      = True
-                claims_with_evidence += 1
-
-                # Remove stale FAISS evidence for this claim now that live
-                # evidence supersedes it. Without this, all_evidence contains
-                # both the weak FAISS hits that *triggered* the live fallback
-                # and the stronger live results, with no frontend indicator of
-                # which is which — misleading for users and for scoring.
-                all_evidence = [
-                    e for e in all_evidence
-                    if not (
-                        e.get("claim_text") == claim["text"]
-                        and e.get("source_type", "faiss") != "live"
-                    )
-                ]
-
-                # Replace the previously added unverified entry for this claim
-                claim_results = [
-                    c for c in claim_results if c["text"] != claim["text"]
-                ]
-
-                claim_label = {
-                    "support":    "supported",
-                    "contradict": "unverified",
-                    "neutral":    "neutral",
-                }.get(multi["type"], "unverified")
-
-                claim_results.append({
-                    "text":             claim["text"],
-                    "sentence_index":   claim["sentence_index"],
-                    "label":            claim_label,
-                    "confidence":       claim["confidence"],
-                    "nli_confidence":   multi["nli_confidence"],
-                    "evidence_found":   True,
-                    "stage_failed":     "none",
-                    "check_worthiness": claim_worthiness.get(
-                        claim["text"][:80], {}
-                    ).get("score"),
-                    "vote_breakdown":   multi["vote_breakdown"],
-                    "source_type":      "live",
-                })
-
-                if multi["type"] in ("support", "contradict"):
-                    evidence_map[claim["sentence_index"]] = multi["type"]
-
-            if live_search_used:
-                logger.info("[6] Live search provided usable evidence.")
-
-        # ── Coverage metrics ──────────────────────────────────────────────────
-        total_claims      = len(raw_claims)
-        evidence_coverage = (
-            round(claims_with_evidence / total_claims, 3)
-            if total_claims > 0 else 0.0
-        )
-        is_partial   = (total_claims > 0 and evidence_coverage == 0.0)
-        unverified_claims = [
-            c["text"] for c in claim_results
-            if not c.get("evidence_found", True)
-            or c.get("stage_failed") not in ("none", None)
-        ]
-        suggest_secondary_retrieval = evidence_coverage < 0.5
-
-        logger.info(
-            f"[6+7] Coverage: {claims_with_evidence}/{total_claims} "
-            f"({evidence_coverage:.0%}) — partial={is_partial} "
-            f"live_search_used={live_search_used}"
-        )
-
-        # Fix 9a — deduplicate evidence by full-text hash (+ fuzzy domain prefix)
-        seen_hashes: set = set()
-        seen_fuzzy:  set = set()
-        dedup_evidence_list = []
-        for ev in sorted(all_evidence, key=lambda x: x["similarity_score"], reverse=True):
-            full_hash  = _hashlib.md5(ev["evidence_text"].encode()).hexdigest()
-            fuzzy_key  = ev["evidence_text"][:80].strip().lower() + "|" + ev.get("source_label", "")
-            if full_hash in seen_hashes or fuzzy_key in seen_fuzzy:
-                continue
-            seen_hashes.add(full_hash)
-            seen_fuzzy.add(fuzzy_key)
-            dedup_evidence_list.append(ev)
-        dedup_evidence = dedup_evidence_list[:MAX_EVIDENCE]
-
-        # Recompute after dedup — dedup may have removed some decisive pieces,
-        # though in practice dedup only removes exact duplicates.
-        decisive_evidence_count = sum(
-            1 for e in dedup_evidence if e.get("type") in ("support", "contradict")
-        )
-        all_evidence_neutral = (
-            len(dedup_evidence) > 0 and decisive_evidence_count == 0
-        )
-
-        # ── 8. Credibility Scoring ────────────────────────────────────────────
-        scoring = _compute_score(
-            source_score=source_result["score"],
-            bias_score=bias_result["score"],
-            evidence_items=dedup_evidence,
-            claim_results=claim_results,
-            evidence_coverage=evidence_coverage,
-            all_evidence_neutral=all_evidence_neutral,
-        )
-        logger.info(f"[8] Final score: {scoring['score']} ({scoring['label']})")
-
-        # ── 9. Annotation ─────────────────────────────────────────────────────
-        annotated = AnnotationEngine.annotate(doc, raw_claims, evidence_map)
+        except Exception:
+            pass  # non-critical
 
         processing_ms = int((time.time() - t0) * 1000)
-        logger.info(f"Pipeline complete in {processing_ms} ms")
-
-        # ── Generate explanation ──────────────────────────────────────────────
-        _score  = scoring["score"]
-        _label  = scoring["label"]
-        _nc     = no_claims_detected
-        _cov    = evidence_coverage
-        if _nc or not claim_results:
-            explanation = (
-                "No verifiable factual claims were detected in the submitted text. "
-                "The credibility score is based on source reliability and bias signals only."
-            )
-        elif is_partial:
-            explanation = "The analysis is inconclusive due to insufficient evidence coverage."
-        elif _score >= 60:
-            explanation = (
-                f"The content appears likely credible (score: {_score}/100). "
-                f"{len(claim_results)} claim(s) were checked and supported by available evidence."
-            )
-        elif _score >= 40:
-            explanation = (
-                f"The content credibility is uncertain (score: {_score}/100). "
-                "Some claims lack strong corroborating evidence or sources show mixed reliability."
-            )
-        else:
-            explanation = (
-                f"The content is likely misleading (score: {_score}/100). "
-                "Claims are poorly supported or contradicted by available evidence."
-            )
-
-        # MIL tip based on label
-        _mil_tips = {
-            "Likely Credible":    "Even credible-looking content can be misleading out of context — always check the original source.",
-            "Uncertain":          "When credibility is uncertain, cross-check with multiple independent sources before sharing.",
-            "Likely Misleading":  "Be cautious sharing this content. Look for fact-checks from established fact-checking organisations.",
-            "Inconclusive":       "Not enough information was available to assess this content. Seek additional sources.",
-        }
-        mil_tip = _mil_tips.get(_label, "Always verify information before sharing it.")
+        logger.info(
+            f"Pipeline complete in {processing_ms} ms — "
+            f"{len(articles)} articles, live={live_search_used}, "
+            f"diversity={diversity.diversity_score}"
+        )
 
         return {
-            "score":                       scoring["score"],
-            "label":                       scoring["label"],
-            "is_inconclusive":             scoring.get("is_inconclusive", False),
-            "explanation":                 explanation,
-            "explanation_source":          "rule_based",
-            "mil_tip":                     mil_tip,
-            "mil_tip_source":              "rule_based",
-            "claims":                      claim_results,
-            "evidence":                    dedup_evidence,
-            "annotated":                   annotated,
-            "source_score":                source_result["score"],
-            "source_result":               source_result,
-            "bias_score":                  bias_result["score"],
-            "bias_result":                 bias_result,
-            "sub_scores":                  scoring["sub_scores"],
-            "processing_ms":               processing_ms,
-            "is_partial":                  is_partial,
-            "no_claims_detected":          no_claims_detected,
-            "evidence_coverage":           evidence_coverage,
-            "unverified_claims":           unverified_claims,
-            "suggest_secondary_retrieval": suggest_secondary_retrieval,
-            "live_search_used":            live_search_used,
-            "all_evidence_neutral":        all_evidence_neutral,
-            "url_fetch_failed":            url_fetch_failed,
-            "url_fetch_error":             url_fetch_error if url_fetch_failed else "",
-            "evidence_quality_note":       "",
+            "articles":         articles,
+            "keywords":         keywords[:10],
+            "processing_ms":    processing_ms,
+            "live_search_used": live_search_used,
+            "url_fetch_failed": url_fetch_failed,
+            "url_fetch_error":  url_fetch_error if url_fetch_failed else "",
+            "source_diversity": diversity.dict(),
         }
+
+
+def _log_source_diversity(submission_id, session_token, diversity: SourceDiversityInfo):
+    """Fire-and-forget log of source diversity to the DB."""
+    try:
+        import sqlalchemy as sa
+        from database.models import engine
+        with engine.begin() as conn:
+            conn.execute(sa.text("""
+                INSERT INTO source_diversity_log
+                    (submission_id, session_token, total_articles,
+                     count_government, count_academic, count_news,
+                     count_factcheck, count_international, count_other,
+                     diversity_score)
+                VALUES
+                    (:sid, :tok, :total,
+                     :gov, :acad, :news,
+                     :fc, :intl, :other,
+                     :dscore)
+            """), {
+                "sid":    submission_id,
+                "tok":    session_token,
+                "total":  diversity.total_articles,
+                "gov":    diversity.count_government,
+                "acad":   diversity.count_academic,
+                "news":   diversity.count_news,
+                "fc":     diversity.count_factcheck,
+                "intl":   diversity.count_international,
+                "other":  diversity.count_other,
+                "dscore": diversity.diversity_score,
+            })
+    except Exception as e:
+        pass  # non-critical — never fail the pipeline over a log write

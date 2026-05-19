@@ -18,19 +18,63 @@ const LESSON_META = {
   confirmation_bias:  { icon:'🧠', takeaway:'The content you agree with most strongly deserves the most scrutiny — not the least.' },
 };
 
-// Default icon by topic
-const TOPIC_ICONS = {
-  claim_detection:'🎯', source_verification:'🔍', bias_detection:'⚡',
-  evidence_evaluation:'📊', general:'📖',
+// ── Dynamic topic system — works for ANY topic added via the admin dashboard ───
+// Seeded hints for known topics; unknown topics auto-generate from their key.
+const TOPIC_HINTS = {
+  claim_detection:    { label:'Claim Detection',    icon:'🎯', h:220 },
+  source_verification:{ label:'Source Verification', icon:'🔍', h:158 },
+  bias_detection:     { label:'Bias Detection',      icon:'⚡', h: 38 },
+  evidence_evaluation:{ label:'Evidence Evaluation', icon:'📊', h:340 },
+  general:            { label:'General MIL',         icon:'📖', h:260 },
 };
 
-const TOPIC_META = {
-  claim_detection:    { label:'Claim Detection',    cls:'tag-claim' },
-  source_verification:{ label:'Source Verification', cls:'tag-source' },
-  bias_detection:     { label:'Bias Detection',      cls:'tag-bias' },
-  evidence_evaluation:{ label:'Evidence Evaluation', cls:'tag-evidence' },
-  general:            { label:'General MIL',         cls:'tag-general' },
-};
+// Auto-assigns a stable hue to any unknown topic by hashing its string
+function _topicHue(topic) {
+  let h = 0;
+  for (let i = 0; i < topic.length; i++) h = (h * 31 + topic.charCodeAt(i)) & 0xffff;
+  return h % 360;
+}
+
+// Returns { label, icon, cls, style } for any topic key
+function getTopicMeta(topic) {
+  const hint = TOPIC_HINTS[topic];
+  const hue  = hint ? hint.h : _topicHue(topic);
+  const label = hint ? hint.label
+                     : topic.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+  const icon  = hint ? hint.icon : '📄';
+  // Inline style replaces CSS class — works for any topic without touching styles.css
+  const tagStyle = `background:hsla(${hue},70%,65%,.13);color:hsl(${hue},70%,72%);`;
+  return { label, icon, hue, tagStyle };
+}
+
+// Legacy shims so existing renderGrid / renderQuizTopicCards code keeps working
+const TOPIC_ICONS = new Proxy({}, { get: (_, t) => getTopicMeta(t).icon });
+const TOPIC_META  = new Proxy({}, { get: (_, t) => ({ ...getTopicMeta(t), cls: 'tag-dynamic' }) });
+
+// ── Media renderer for quiz questions ────────────────────────────────────────
+// Renders the correct element based on the file extension of image_url.
+// Supports images, PDFs (embedded via <iframe>), and videos.
+function _renderQuestionMedia(q) {
+  const url = q && (q.image_url || q.video_url);
+  if (!url) return '';
+  const lower = url.toLowerCase();
+
+  // PDF — embed in an iframe so it renders inline
+  if (lower.endsWith('.pdf')) {
+    return `<iframe src="${url}" style="width:100%;height:320px;border:1px solid var(--border);border-radius:10px;margin-bottom:.85rem;" loading="lazy" title="PDF attachment"></iframe>`;
+  }
+
+  // Video
+  if (lower.match(/\.(mp4|webm|mov|avi)$/)) {
+    return `<video controls style="width:100%;max-height:240px;border-radius:10px;margin-bottom:.85rem;border:1px solid var(--border);">
+      <source src="${url}">
+      <p style="font-size:.8rem;color:var(--muted);">Your browser doesn't support embedded video. <a href="${url}" target="_blank">Download</a></p>
+    </video>`;
+  }
+
+  // Image (default)
+  return `<img src="${url}" alt="question media" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;margin-bottom:.85rem;border:1px solid var(--border);" onerror="this.style.display='none'">`;
+}
 
 // Strip HTML tags for preview generation
 function stripHtml(html) {
@@ -46,10 +90,24 @@ function readTime(content) {
   return `${mins} min read`;
 }
 
+// Render lesson content: HTML lessons render as-is; plain-text lessons
+// get their newlines converted to paragraphs so they display correctly.
+function _formatLessonContent(content) {
+  if (!content) return '';
+  const trimmed = content.trim();
+  if (trimmed.startsWith('<')) return trimmed; // already HTML
+  return trimmed
+    .split(/\n\n+/)
+    .map(p => `<p style="margin-bottom:.75rem;">${p.replace(/\n/g, '<br>')}</p>`)
+    .join('');
+}
+
 // ── Fetch lessons from API ─────────────────────────────────────────────────────
 async function loadLessons() {
   try {
-    const res  = await fetch(`${API_BASE}/lessons`, { credentials: 'include' });
+    const isAdmin = localStorage.getItem('sp_role') === 'admin';
+    const url = isAdmin ? `${API_BASE}/lessons?include_unpublished=1` : `${API_BASE}/lessons`;
+    const res  = await fetch(url, { credentials: 'include' });
     const data = await res.json();
     if (!Array.isArray(data) || !data.length) throw new Error('empty');
     LESSONS = data.map(l => ({
@@ -67,6 +125,8 @@ async function loadLessons() {
   }
   updateProgress();
   renderGrid(getFiltered());
+  renderFilterBar();
+  renderQuizTopicCards();
 }
 
 // ── Render grid ────────────────────────────────────────────────────────────────
@@ -77,12 +137,19 @@ function renderGrid(list) {
   empty.style.display = 'none';
 
   grid.innerHTML = list.map(l => {
-    const tm     = TOPIC_META[l.topic] || { label: l.topic, cls: 'tag-general' };
+    const tm     = getTopicMeta(l.topic);
     const done   = completedKeys.has(l.key);
     const rt     = readTime(l.content || l.preview || '');
+    const unpub  = l.is_published === 0 || l.is_published === false;
     return `
-      <div class="lesson-card ${done?'completed':''}" onclick="openLesson('${l.key}')">
-        <div class="lesson-topic-tag ${tm.cls}">${tm.label}</div>
+      <div class="lesson-card grid-card ${done?'completed':''} ${unpub?'lesson-card--unpublished':''}"
+           onclick="openLesson('${l.key}')"
+           data-lesson-id="${l.id}"
+           data-lesson-key="${l.key}"
+           data-topic="${l.topic}"
+           style="${unpub ? 'opacity:.6;' : ''}">
+        <div class="lesson-topic-tag" style="${tm.tagStyle}">${tm.label}</div>
+        ${unpub ? '<div style="font-size:.65rem;color:var(--muted);margin-bottom:.25rem;font-family:\'DM Mono\',monospace;">⏸ DEACTIVATED</div>' : ''}
         <span class="lesson-icon">${l.icon}</span>
         <div class="lesson-title">${l.title}</div>
         <div class="lesson-preview">${l.preview}</div>
@@ -152,6 +219,11 @@ function setFilter(btn, filter) {
 
 // ── Open lesson modal ──────────────────────────────────────────────────────────
 async function openLesson(key) {
+  // Pretest is non-negotiable — block lesson access until completed
+  if (!localStorage.getItem('sp_pretest_done')) {
+    initPretest();
+    return;
+  }
   const l = LESSONS.find(x => x.key === key);
   if (!l) return;
   const tm  = TOPIC_META[l.topic] || { label: l.topic, cls: 'tag-general' };
@@ -161,6 +233,7 @@ async function openLesson(key) {
 
   document.getElementById('modal-body').innerHTML = `
     <div class="lesson-topic-tag ${tm.cls}" style="margin-bottom:1.2rem;">${tm.label}</div>
+    ${l.image_url ? `<img src="${l.image_url}" alt="${l.title}" style="width:100%;max-height:220px;object-fit:cover;border-radius:12px;margin-bottom:1.1rem;border:1px solid var(--border);" onerror="this.style.display='none'">` : ''}
     <div style="font-size:2rem;margin-bottom:.6rem;">${l.icon}</div>
     <div class="modal-title">${l.title}</div>
     <div style="display:flex;gap:.9rem;align-items:center;margin-bottom:1.2rem;flex-wrap:wrap;">
@@ -168,10 +241,9 @@ async function openLesson(key) {
         <span class="diff-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${diffColor}"></span>
         ${l.difficulty.toUpperCase()}
       </span>
-      <span style="font-family:'DM Mono',monospace;font-size:.65rem;color:var(--muted);">⏱ ${rt}</span>
       ${l.mil_skill ? `<span style="font-family:'DM Mono',monospace;font-size:.65rem;color:var(--accent2);">MIL: ${l.mil_skill}</span>` : ''}
     </div>
-    <div class="modal-content">${l.content || l.preview || ''}</div>
+    <div class="modal-content">${_formatLessonContent(l.content || l.preview || '')}</div>
     ${l.takeaway ? `<div class="takeaway"><div class="takeaway-label">KEY TAKEAWAY</div><div class="takeaway-text">${l.takeaway}</div></div>` : ''}
 
     <!-- Micro-quiz section -->
@@ -206,7 +278,8 @@ async function loadMicroQuiz(topic, lessonKey, alreadyDone) {
     const letters = ['A','B','C','D'];
 
     area.innerHTML = `
-      ${q.image_url ? `<img src="${q.image_url}" alt="question image" style="width:100%;max-height:200px;object-fit:cover;border-radius:10px;margin-bottom:.85rem;border:1px solid var(--border);">` : ''}
+      ${q.scenario_text ? `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:.65rem .85rem;margin-bottom:.75rem;font-size:.82rem;line-height:1.6;color:var(--muted);">${q.scenario_text}</div>` : ''}
+      ${_renderQuestionMedia(q)}
       <div class="micro-quiz-q">${q.question_text}</div>
       <div class="micro-options" id="micro-options">
         ${options.map((opt,i) => `
@@ -284,7 +357,7 @@ function markComplete(key, auto = false) {
   // Sync to server (best-effort)
   const lessonId = (LESSONS.find(l => l.key === key) || {}).id;
   if (lessonId) {
-    fetch(`${API_BASE}/lessons/${lessonId}/read`, {
+    fetch(`${API_BASE}/lessons/${lessonId}/complete`, {
       method: 'POST', credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
     }).catch(() => {});
@@ -318,20 +391,21 @@ loadLessons();
 (function() {
   const username  = localStorage.getItem('sp_username');
   const role      = localStorage.getItem('sp_role');
-  const loginLink = document.getElementById('sidebar-login-link');
+  const loginLink  = document.getElementById('sidebar-login-link');
+  const loginLinkM = document.getElementById('sidebar-login-link-m');
 
-  if (username && loginLink) {
-    loginLink.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+  if (username) {
+    const logoutHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
       <polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
     </svg> Log out`;
-    loginLink.href = '#';
-    loginLink.style.color = 'var(--red)';
-    loginLink.onclick = async e => {
+    const doLogout = async e => {
       e.preventDefault();
       await fetch('/auth/cookie-logout',{method:'POST',credentials:'include'}).catch(()=>{});
       localStorage.clear(); window.location.href = 'login.html';
     };
+    if (loginLink)  { loginLink.innerHTML  = logoutHTML; loginLink.href  = '#'; loginLink.style.color  = 'var(--red)'; loginLink.onclick  = doLogout; }
+    if (loginLinkM) { loginLinkM.innerHTML = logoutHTML; loginLinkM.href = '#'; loginLinkM.style.color = 'var(--red)'; loginLinkM.onclick = doLogout; }
   }
 
 })();
@@ -346,42 +420,98 @@ const QUIZ_TOPIC_COLORS = {
   claim_detection:'var(--blue)', source_verification:'var(--accent2)',
   bias_detection:'var(--orange)', evidence_evaluation:'var(--green)', general:'var(--accent)'
 };
-const qState = { questions:[], currentIndex:0, score:0, topicStats:{}, selectedTopic:'all', answered:{} };
 
-(async function() {
-  try {
-    const res  = await fetch(`${QUIZ_API}/quiz/settings`, { credentials:'include' });
-    const data = await res.json();
-    const n = data.questions_per_session || 10;
-    document.getElementById('quiz-q-count').textContent = `${n} questions per session`;
-  } catch(e) { document.getElementById('quiz-q-count').textContent = '10 questions per session'; }
-  // daily badge
-  const lastPlayed = localStorage.getItem('sp_quiz_last_date');
-  const today = new Date().toISOString().slice(0,10);
-  const wrap = document.getElementById('daily-badge-wrap');
-  if (wrap && lastPlayed !== today) {
-    wrap.innerHTML = `<div style="display:inline-flex;align-items:center;gap:.4rem;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);color:var(--yellow);font-family:'DM Mono',monospace;font-size:.68rem;padding:.3rem .8rem;border-radius:20px;margin-bottom:1rem;">⭐ New today — you haven't practised yet</div>`;
-  }
-})();
+// ── Build filter bar from whatever topics are actually in the DB ───────────────
+function renderFilterBar() {
+  const bar = document.getElementById('filter-bar');
+  if (!bar) return;
+  const topics = [...new Set(LESSONS.map(l => l.topic).filter(Boolean))];
+  bar.innerHTML = `<button class="filter-btn active" data-filter="all" onclick="setFilter(this,'all')">📚 All</button>`;
+  topics.forEach(topic => {
+    const tm  = getTopicMeta(topic);
+    const btn = document.createElement('button');
+    btn.className = 'filter-btn';
+    btn.dataset.filter = topic;
+    btn.onclick = function(){ setFilter(this, topic); };
+    btn.textContent = `${tm.icon} ${tm.label}`;
+    bar.appendChild(btn);
+  });
+}
+
+// ── Build quiz topic cards — one card per unique topic ─────────────────────────
+function renderQuizTopicCards() {
+  const grid = document.getElementById('quiz-topic-grid');
+  if (!grid) return;
+
+  // Build topic set: start from the known MIL topics, then add any extra topics from LESSONS
+  const knownTopics = Object.keys(QUIZ_TOPIC_NAMES);
+  const lessonTopics = [...new Set(LESSONS.map(l => l.topic).filter(Boolean))];
+  const allTopics = [...new Set([...knownTopics, ...lessonTopics])];
+
+  const allCard = `
+    <div class="topic-card" data-topic="all" onclick="quizSelectTopic(this,'all')"
+         style="padding:1rem;border-radius:12px;border:1px solid var(--accent);background:rgba(79,142,247,.08);cursor:pointer;transition:all .2s;">
+      <div style="font-size:1.4rem;margin-bottom:.4rem;">📚</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;margin-bottom:.2rem;">All Topics</div>
+      <div style="font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);">Mixed practice</div>
+    </div>`;
+
+  const topicCards = allTopics.map(topic => {
+    const tm = getTopicMeta(topic);
+    return `
+      <div class="topic-card" data-topic="${topic}"
+           onclick="quizSelectTopic(this,'${topic}')"
+           style="padding:1rem;border-radius:12px;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:all .2s;"
+           onmouseenter="if(qState.selectedTopic!=='${topic}'){this.style.borderColor='hsl(${tm.hue},60%,55%)';this.style.background='hsla(${tm.hue},60%,55%,.08)'}"
+           onmouseleave="if(qState.selectedTopic!=='${topic}'){this.style.borderColor='var(--border)';this.style.background='var(--surface)'}">
+        <div style="font-size:1.4rem;margin-bottom:.4rem;">${tm.icon}</div>
+        <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;margin-bottom:.2rem;">${tm.label}</div>
+      </div>`;
+  }).join('');
+
+  grid.innerHTML = allCard + topicCards;
+}
 
 function quizSelectTopic(el, topic) {
+  qState.selectedTopic = topic; // set FIRST so hover guards see updated value
   document.querySelectorAll('#quiz-topic-grid .topic-card').forEach(c => {
     c.style.borderColor = 'var(--border)'; c.style.background = 'var(--surface)';
   });
   el.style.borderColor = 'var(--accent)'; el.style.background = 'rgba(79,142,247,.08)';
-  qState.selectedTopic = topic;
+  qState.selectedLessonId = null;
+  qState._selectedEl = el;
 }
 
+function _shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+const qState = { questions:[], currentIndex:0, score:0, topicStats:{}, selectedTopic:'all', selectedLessonId:null, answered:{}, _selectedEl:null };
+
+// Session limit removed — quiz loads all available questions for the selected topic.
+
 async function quizStart() {
-  qState.score = 0; qState.currentIndex = 0; qState.topicStats = {}; qState.answered = {};
+  qState.score = 0; qState.currentIndex = 0; qState.topicStats = {}; qState.answered = {}; qState._shuffled = {}; qState._selIdx = {};
   const topic = qState.selectedTopic;
-  const url = topic === 'all' ? `${QUIZ_API}/quiz?limit=10` : `${QUIZ_API}/quiz?topic=${topic}&limit=10`;
+  let url;
+  if (topic && topic !== 'all') {
+    url = `${QUIZ_API}/quiz?topic=${encodeURIComponent(topic)}&limit=50`;
+  } else {
+    url = `${QUIZ_API}/quiz?limit=50`;
+  }
   try {
     const res = await fetch(url, { credentials:'include' });
-    qState.questions = await res.json() || [];
+    const qs = await res.json() || [];
+    // Shuffle question order for each new session
+    qState.questions = _shuffleArray(qs);
   } catch(e) { qState.questions = []; }
   if (!qState.questions.length) {
-    alert('Could not load questions — make sure the API is running.');
+    alert('No quiz questions found in the database. Ask an admin to seed questions, or import seed_quiz_questions.sql.');
     return;
   }
   document.getElementById('quiz-screen-start').style.display = 'none';
@@ -391,9 +521,55 @@ async function quizStart() {
   quizRender();
 }
 
+function quizBackToTopics() {
+  // Cancel current quiz and go back to topic selection
+  document.getElementById('quiz-screen-quiz').style.display = 'none';
+  document.getElementById('quiz-screen-results').style.display = 'none';
+  document.getElementById('quiz-screen-start').style.display = '';
+  // Re-apply topic highlight if one was selected
+  if (qState._selectedEl) {
+    document.querySelectorAll('#quiz-topic-grid .topic-card').forEach(c => {
+      c.style.borderColor = 'var(--border)'; c.style.background = 'var(--surface)';
+    });
+    qState._selectedEl.style.borderColor = 'var(--accent)';
+    qState._selectedEl.style.background = 'rgba(79,142,247,.08)';
+  }
+}
+
+function _shuffleOptions(q) {
+  // Reshuffle answer options on every render so position can't be memorised.
+  // Works for multiple_choice and scenario_based. Skips true_false + identification.
+  const qt = q.question_type || 'multiple_choice';
+  if (qt === 'true_false' || qt === 'identification') return q;
+  const rawOptions = Array.isArray(q.options) ? q.options : JSON.parse(q.options || '[]');
+  if (!rawOptions.length) return q;
+  const indexed = rawOptions.map((text, i) => ({ text, orig: i }));
+  for (let i = indexed.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [indexed[i], indexed[j]] = [indexed[j], indexed[i]];
+  }
+  const origToNew = {};
+  indexed.forEach((item, newIdx) => { origToNew[item.orig] = newIdx; });
+  const shuffled = { ...q, options: indexed.map(item => item.text) };
+  if (qt === 'multiple_answer') {
+    const ci = Array.isArray(q.correct_indices) ? q.correct_indices : [];
+    shuffled.correct_indices = ci.map(i => origToNew[i]).filter(i => i !== undefined);
+    shuffled.correct_index = 0;
+  } else {
+    shuffled.correct_index = origToNew[q.correct_index] ?? q.correct_index;
+  }
+  return shuffled;
+}
+
 function quizRender() {
-  const q = qState.questions[qState.currentIndex];
-  if (!q) { quizShowResults(); return; }
+  const raw = qState.questions[qState.currentIndex];
+  if (!raw) { quizShowResults(); return; }
+  // Persist shuffled options per question index so going prev/next shows same order
+  if (!qState._shuffled) qState._shuffled = {};
+  if (!qState._shuffled[qState.currentIndex]) {
+    qState._shuffled[qState.currentIndex] = _shuffleOptions(raw);
+  }
+  const q = qState._shuffled[qState.currentIndex];
   const total = qState.questions.length;
   const options = Array.isArray(q.options) ? q.options : JSON.parse(q.options || '[]');
   const letters = ['A','B','C','D'];
@@ -402,26 +578,72 @@ function quizRender() {
   document.getElementById('quiz-score-label').innerHTML = `Score: <b>${qState.score}</b>`;
   document.getElementById('quiz-progress-fill').style.width = `${(qState.currentIndex/total)*100}%`;
   document.getElementById('quiz-feedback-box').style.display = 'none';
-  document.getElementById('quiz-skip-btn').style.display = '';
-  document.getElementById('quiz-next-btn').style.display = 'none';
-  document.getElementById('quiz-question-container').innerHTML = `
+
+  const answeredVal = qState.answered[qState.currentIndex];
+  const alreadyAnswered = !!answeredVal && answeredVal !== 'skipped';
+  // Show/hide navigation buttons
+  const prevBtn = document.getElementById('quiz-prev-btn');
+  if (prevBtn) prevBtn.style.display = qState.currentIndex > 0 ? '' : 'none';
+  document.getElementById('quiz-skip-btn').style.display = alreadyAnswered ? 'none' : '';
+  document.getElementById('quiz-next-btn').style.display = alreadyAnswered ? '' : 'none';
+
+  const qContainer = document.getElementById('quiz-question-container');
+  qContainer.dataset.explanation = (q.explanation||'');
+  qContainer.dataset.hint = (q.hint||'');
+  qContainer.innerHTML = `
     <div style="display:inline-flex;align-items:center;gap:.4rem;font-family:'DM Mono',monospace;font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;padding:.3rem .7rem;border-radius:20px;margin-bottom:1rem;background:rgba(79,142,247,.15);color:var(--accent);">${QUIZ_TOPIC_NAMES[topic]||topic}</div>
-    ${q.image_url ? `<img src="${q.image_url}" alt="question image" style="width:100%;max-height:220px;object-fit:cover;border-radius:12px;margin-bottom:1rem;border:1px solid var(--border);">` : ''}
+    ${q.scenario_text ? `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.85rem 1rem;margin-bottom:1rem;font-size:.88rem;line-height:1.65;color:var(--muted);">${q.scenario_text}</div>` : ''}
+    ${_renderQuestionMedia(q)}
     <div style="font-size:1.05rem;font-weight:500;line-height:1.6;margin-bottom:1.5rem;">${q.question_text}</div>
+    ${q.hint ? `<div style="margin-bottom:1rem;">
+      <button id="quiz-hint-btn" onclick="const h=document.getElementById('quiz-hint-box');const show=h.style.display==='none';h.style.display=show?'block':'none';this.textContent=show?'\ud83d\udca1 Hide hint':'\ud83d\udca1 Show hint';"
+        style="background:none;border:1px solid rgba(251,191,36,.4);border-radius:20px;color:#f59e0b;font-size:.75rem;padding:.3rem .75rem;cursor:pointer;font-family:'DM Sans',sans-serif;">
+        \ud83d\udca1 Show hint
+      </button>
+      <div id="quiz-hint-box" style="display:none;margin-top:.5rem;padding:.65rem .9rem;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.25);border-radius:9px;font-size:.85rem;line-height:1.6;color:var(--text);">
+        ${q.hint}
+      </div>
+    </div>` : ''}
     <div style="display:flex;flex-direction:column;gap:.65rem;">
-      ${options.map((opt,i) => `
-        <button style="width:100%;text-align:left;padding:.85rem 1.1rem;border-radius:12px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:'DM Sans',sans-serif;font-size:.92rem;line-height:1.5;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:.75rem;" 
-          data-idx="${i}" onclick="quizAnswer(${i},${q.correct_index},'${(q.explanation||'').replace(/'/g,"\'")}',${q.id},'${topic}')">
-          <span style="width:22px;height:22px;border-radius:50%;border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);">${letters[i]||i}</span>
+      ${options.map((opt,i) => {
+        // Restore highlight for already-answered questions
+        let btnStyle = 'width:100%;text-align:left;padding:.85rem 1.1rem;border-radius:12px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:\'DM Sans\',sans-serif;font-size:.92rem;line-height:1.5;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:.75rem;';
+        let circleStyle = 'width:22px;height:22px;border-radius:50%;border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:\'DM Mono\',monospace;font-size:.7rem;color:var(--muted);';
+        const savedSel = alreadyAnswered ? qState._selIdx[qState.currentIndex] : undefined;
+        if (alreadyAnswered) {
+          if (i === q.correct_index) { btnStyle = btnStyle.replace('var(--border)','var(--green)').replace('var(--surface)','rgba(52,211,153,.1)').replace('var(--text)','var(--green)'); circleStyle = circleStyle.replace('var(--border)','var(--green)').replace('var(--muted)','var(--green)'); }
+          else if (savedSel !== undefined && i === savedSel && savedSel !== q.correct_index) { btnStyle = btnStyle.replace('var(--border)','var(--red)').replace('var(--surface)','rgba(248,113,113,.1)').replace('var(--text)','var(--red)'); circleStyle = circleStyle.replace('var(--border)','var(--red)').replace('var(--muted)','var(--red)'); }
+        }
+        const disabled = alreadyAnswered ? 'disabled' : '';
+        return `<button style="${btnStyle}" ${disabled}
+          data-idx="${i}" onclick="quizAnswer(${i},${q.correct_index},this.closest('#quiz-question-container').dataset.explanation||'',this.closest('#quiz-question-container').dataset.hint||'',${q.id},'${topic}')">
+          <span style="${circleStyle}">${letters[i]||i}</span>
           <span>${opt}</span>
-        </button>`).join('')}
+        </button>`;
+      }).join('')}
     </div>`;
+
+  // Restore feedback box for already-answered questions
+  if (alreadyAnswered) {
+    const savedSel = qState._selIdx ? qState._selIdx[qState.currentIndex] : undefined;
+    const isCorrect = savedSel === q.correct_index;
+    const fb = document.getElementById('quiz-feedback-box');
+    fb.style.display = 'block';
+    fb.style.background = isCorrect ? 'rgba(52,211,153,.1)' : 'rgba(248,113,113,.1)';
+    fb.style.border = isCorrect ? '1px solid rgba(52,211,153,.25)' : '1px solid rgba(248,113,113,.25)';
+    fb.innerHTML = `<strong style="color:${isCorrect?'var(--green)':'var(--red)'}">${isCorrect?'✓ Correct!':'✗ Incorrect'}</strong>` + (q.explanation ? `<br><span style="font-size:.88rem;">${q.explanation}</span>` : '');
+  }
 }
 
-async function quizAnswer(sel, correct, explanation, qid, topic) {
+async function quizAnswer(sel, correct, explanation, hint, qid, topic) {
   if (qState.answered[qState.currentIndex]) return;
   qState.answered[qState.currentIndex] = true;
+  if (!qState._selIdx) qState._selIdx = {};
+  qState._selIdx[qState.currentIndex] = sel; // save selected index for prev navigation
   const isCorrect = sel === correct;
+  // Hide hint toggle once answered
+  const hintBtn = document.getElementById('quiz-hint-btn');
+  if (hintBtn) hintBtn.style.display = 'none';
   document.querySelectorAll('#quiz-question-container button[data-idx]').forEach((btn, i) => {
     btn.disabled = true;
     if (i === correct) { btn.style.borderColor='var(--green)'; btn.style.background='rgba(52,211,153,.1)'; btn.style.color='var(--green)'; }
@@ -435,7 +657,10 @@ async function quizAnswer(sel, correct, explanation, qid, topic) {
   fb.style.display = 'block';
   fb.style.background = isCorrect ? 'rgba(52,211,153,.1)' : 'rgba(248,113,113,.1)';
   fb.style.border = isCorrect ? '1px solid rgba(52,211,153,.25)' : '1px solid rgba(248,113,113,.25)';
-  fb.innerHTML = `<strong style="color:${isCorrect?'var(--green)':'var(--red)'}">${isCorrect?'✓ Correct!':'✗ Incorrect'}</strong>${explanation?`<br><span style="font-size:.88rem;">${explanation}</span>`:''}${!isCorrect?`<br><a href="lessons.html" style="display:inline-flex;align-items:center;gap:.4rem;margin-top:.5rem;font-family:'DM Mono',monospace;font-size:.72rem;color:var(--accent);text-decoration:none;border:1px solid rgba(79,142,247,.3);border-radius:8px;padding:.3rem .8rem;">📖 Review ${QUIZ_TOPIC_NAMES[topic]||topic} lessons →</a>`:''}`;
+  fb.innerHTML = `<strong style="color:${isCorrect?'var(--green)':'var(--red)'}">${isCorrect?'✓ Correct!':'✗ Incorrect'}</strong>`
+    + (explanation ? `<br><span style="font-size:.88rem;">${explanation}</span>` : '')
+    + (!isCorrect && hint ? `<div style="margin-top:.55rem;padding:.55rem .8rem;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);border-radius:8px;font-size:.83rem;line-height:1.55;color:var(--text);"><span style="color:#f59e0b;font-weight:600;">💡 Hint:</span> ${hint}</div>` : '')
+    + (!isCorrect ? `<br><a href="lessons.html" style="display:inline-flex;align-items:center;gap:.4rem;margin-top:.5rem;font-family:'DM Mono',monospace;font-size:.72rem;color:var(--accent);text-decoration:none;border:1px solid rgba(79,142,247,.3);border-radius:8px;padding:.3rem .8rem;">📖 Review ${QUIZ_TOPIC_NAMES[topic]||topic} lessons →</a>` : '');
   document.getElementById('quiz-score-label').innerHTML = `Score: <b>${qState.score}</b>`;
   document.getElementById('quiz-skip-btn').style.display = 'none';
   document.getElementById('quiz-next-btn').style.display = '';
@@ -454,10 +679,10 @@ async function quizAnswer(sel, correct, explanation, qid, topic) {
 }
 
 function quizSkip() {
-  if (!qState.answered[qState.currentIndex]) {
-    const q = qState.questions[qState.currentIndex];
-    if (q && q.topic) { if (!qState.topicStats[q.topic]) qState.topicStats[q.topic]={correct:0,total:0}; qState.topicStats[q.topic].total++; }
-  }
+  if (qState.answered[qState.currentIndex]) return;
+  const q = qState.questions[qState.currentIndex];
+  if (q && q.topic) { if (!qState.topicStats[q.topic]) qState.topicStats[q.topic]={correct:0,total:0}; qState.topicStats[q.topic].total++; }
+  qState.answered[qState.currentIndex] = 'skipped';
   qState.currentIndex++;
   if (qState.currentIndex >= qState.questions.length) quizShowResults();
   else quizRender();
@@ -466,7 +691,17 @@ function quizSkip() {
 function quizNext() {
   qState.currentIndex++;
   if (qState.currentIndex >= qState.questions.length) quizShowResults();
-  else { quizRender(); }
+  else quizRender();
+}
+
+function quizPrev() {
+  if (qState.currentIndex <= 0) return;
+  qState.currentIndex--;
+  // If the previous question was skipped, clear it so user can re-answer
+  if (qState.answered[qState.currentIndex] === 'skipped') {
+    delete qState.answered[qState.currentIndex];
+  }
+  quizRender();
 }
 
 function quizShowResults() {
@@ -487,9 +722,17 @@ function quizShowResults() {
 function quizRetry() {
   document.getElementById('quiz-screen-results').style.display = 'none';
   document.getElementById('quiz-screen-start').style.display = '';
+  // Re-highlight selected topic if any
+  if (qState._selectedEl) {
+    document.querySelectorAll('#quiz-topic-grid .topic-card').forEach(c => {
+      c.style.borderColor = 'var(--border)'; c.style.background = 'var(--surface)';
+    });
+    qState._selectedEl.style.borderColor = 'var(--accent)';
+    qState._selectedEl.style.background = 'rgba(79,142,247,.08)';
+  }
 }
 
-// ── Prebunking quiz state — declared here so switchLessonsTab can reference them ──
+
 let _pbqQuestions = [];
 let _pbqActive    = [];
 let _pbqIdx       = 0;
@@ -501,689 +744,1015 @@ let _pbqAnswered  = false;
 function switchLessonsTab(tab) {
   const isLessons    = tab === 'lessons';
   const lessonsEl    = document.getElementById('tab-lessons');
-  const prebunkingEl = document.getElementById('tab-prebunking');
   const navLessons   = document.getElementById('nav-sub-lessons-lessons');
-  const navPrebunking = document.getElementById('nav-sub-lessons-prebunking');
 
-  if (lessonsEl)     lessonsEl.style.display    = isLessons ? '' : 'none';
-  if (prebunkingEl)  prebunkingEl.style.display  = isLessons ? 'none' : '';
-  if (navLessons)    navLessons.classList.toggle('active', isLessons);
-  if (navPrebunking) navPrebunking.classList.toggle('active', !isLessons);
-
-  // Scroll to top of page so Prebunking Lab header is visible, not the quiz
+  if (lessonsEl)  lessonsEl.style.display = isLessons ? '' : 'none';
+  if (navLessons) navLessons.classList.toggle('active', isLessons);
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
   // Update hash for bookmarking/back-button
-  history.replaceState(null, '', isLessons ? '#' : '#prebunking');
+  window.location.hash = tab;
 
-  // Kick off prebunking quiz data load when switching to that tab
-  if (tab === 'prebunking' && _pbqQuestions.length === 0) initPbQuiz();
+  // Refresh relevant stats panel on tab switch
+  if (tab === 'lessons') {
+    // stats are shown in the user dashboard
+  }
 }
-// ── Tab switching done above ───────────────────────────────────────────────────
 
-// Hash-based routing on load: #quiz scrolls to quiz within lessons tab,
-// #prebunking opens the prebunking tab
-(function _handleInitialHash() {
-  const hash = window.location.hash;
-  if (hash === '#prebunking') {
-    switchLessonsTab('prebunking');
-  } else if (hash === '#quiz') {
+// Hash-based routing on load: #quiz scrolls to quiz within lessons tab
+(function() {
+  const hash = window.location.hash.replace('#', '');
+  if (hash === 'quiz') {
     switchLessonsTab('lessons');
     setTimeout(() => { document.getElementById('quiz')?.scrollIntoView({behavior: 'smooth'}); }, 300);
   }
 })();
 
-// ══ PREBUNKING LAB JS ════════════════════════════════════════════════════════
 
 
 
-// ── Technique database ────────────────────────────────────────────────────────
-const TECHNIQUES = [
-  {
-    id: 'emotional_override',
-    quiz_topic: 'bias_detection',
-    name: 'Emotional Override',
-    icon: '😱',
-    color: '#f87171',
-    short: 'Fear & outrage bypass critical thinking',
-    explanation: 'This technique deliberately triggers strong emotions — fear, outrage, disgust, or panic — to make you react before you think. When you\'re emotionally aroused, your brain\'s analytical systems take a back seat. Misinformation spreads faster when it makes you angry or afraid.',
-    why: 'Strong emotions activate the amygdala and reduce prefrontal cortex activity, which handles critical evaluation. Content engineered to outrage is shared 6× more than neutral content.',
-    vaccine_example: '\"DOCTORS ARE KILLING YOUR CHILDREN WITH VACCINES!! Share this before they DELETE it!! Parents are PANICKING as government covers up the TRUTH. Don\'t let them silence us!!\"',
-    vaccine_signals: ['ALL CAPS for alarm', '\"Delete it\" conspiracy implication', 'Parents panicking — fear escalation', 'Urgency to share before reading'],
-    // Hardcoded fallback exercise (used if DB is empty)
-    exercise_example: '\"The cancer cure they\'ve been hiding from you for DECADES. Big Pharma spends $4 BILLION every year suppressing this simple remedy. Doctors are FURIOUS. Share with everyone you love before this gets banned!\"',
-    exercise_label: 'What manipulation technique is this post using?',
-    correct_id: 'emotional_override',
-    explanation_result: 'This uses emotional override combined with urgency. \"Before it gets banned\" triggers fear of missing out. \"Everyone you love\" makes sharing feel like an act of care. The ALL CAPS amplifies urgency to bypass critical thinking.',
-  },
-  {
-    id: 'false_authority',
-    quiz_topic: 'source_verification',
-    name: 'False Authority',
-    icon: '🎓',
-    color: '#fb923c',
-    short: 'Fake or irrelevant credentials lend false credibility',
-    explanation: 'This technique uses the appearance of expertise to make a claim seem credible. The \"expert\" may not exist, may be misrepresented, may have credentials in an unrelated field, or may be a real person whose actual view is the opposite of what\'s being claimed.',
-    why: 'We\'re conditioned from childhood to trust authority figures. Credentials create a mental shortcut: \"an expert said it, so it must be true.\" Bad actors exploit this by fabricating or misrepresenting expertise.',
-    vaccine_example: '\"Harvard neurologist Dr. Michael Reeves confirms: smartphones cause permanent brain damage in under 30 minutes of use. He was fired from the university for publishing this research.\" [Link goes to a personal blog with no institutional affiliation]',
-    vaccine_signals: ['Prestigious institution name-drop', 'Vague but impressive title', '\"Fired for telling the truth\" — martyrdom framing', 'No actual study citation'],
-    exercise_example: '\"Former NASA physicist Dr. Elena Kovacs has confirmed the moon landing was staged. She was part of the original mission team and has now released classified documents proving the hoax. The government has been trying to silence her for 50 years.\"',
-    exercise_label: 'What manipulation technique is primarily being used?',
-    correct_id: 'false_authority',
-    explanation_result: '\"Former NASA physicist\" sounds credible until you ask: is this person real? Can you verify the documents? \"Trying to silence her for 50 years\" is the conspiracy layer added to explain why you can\'t verify. Legitimate scientists publish in peer-reviewed journals.',
-  },
-  {
-    id: 'cherry_pick',
-    quiz_topic: 'evidence_evaluation',
-    name: 'Cherry-Picked Statistics',
-    icon: '📊',
-    color: '#fbbf24',
-    short: 'Real numbers, misleading context',
-    explanation: 'This technique uses real statistics — so it can\'t be called \"fake\" — but selects only the data that supports the desired conclusion while hiding contradictory data. The numbers are technically accurate, the conclusion is deliberately misleading.',
-    why: 'We tend to trust numbers more than words because they feel objective. Cherry-picking exploits this trust by providing partial truth. The lie isn\'t in the number — it\'s in what\'s left out.',
-    vaccine_example: '\"Crime in District 5 DOUBLED under Mayor Santos! In 2022 there were 2 reported robberies. In 2023 there were 4. This is a 100% increase — and she says she\'s tough on crime?\"',
-    vaccine_signals: ['100% increase sounds huge — but 2→4 is tiny', 'No comparison to other districts', 'No context: is this better or worse than national average?', 'One year of data, cherry-picked timeframe'],
-    exercise_example: '\"New study: coffee drinkers have 40% lower risk of liver disease! Scientists at Stanford analyzed data from 1,200 participants and confirmed coffee\'s protective effect. Time to upgrade your morning routine.\"',
-    exercise_label: 'Which technique is most likely being used here?',
-    correct_id: 'cherry_pick',
-    explanation_result: 'The stat may be real — but what\'s missing matters. Was this one study among dozens? Did the others show different results? One study showing correlation is very different from established medical consensus.',
-  },
-  {
-    id: 'false_dichotomy',
-    quiz_topic: 'claim_detection',
-    name: 'False Dichotomy',
-    icon: '⚖️',
-    color: '#a78bfa',
-    short: 'Only two choices presented when many exist',
-    explanation: 'This technique frames a complex situation as having only two possible options — usually one \"right\" and one obviously bad — when reality has many more. It forces you to pick a side and treats any nuance as betrayal.',
-    why: 'Binary thinking is easier for our brains to process. By eliminating middle ground, this technique makes moderation or nuance seem like weakness or complicity. It\'s especially effective at polarizing communities.',
-    vaccine_example: '\"You either support unrestricted free speech online, or you support government censorship and a digital dictatorship. There is no middle ground — which side are you on?\"',
-    vaccine_signals: ['\"No middle ground\" stated explicitly', 'Two extremes only — ignores content moderation, platform policy, legal frameworks', 'Emotional loaded language (\"dictatorship\")', '\"Which side are you on?\" — demands immediate allegiance'],
-    exercise_example: '\"Either we open all borders completely and allow unlimited immigration, OR we build walls and deport everyone who entered illegally. Compromise is just a way of doing nothing. Pick a side.\"',
-    exercise_label: 'Identify the primary manipulation technique:',
-    correct_id: 'false_dichotomy',
-    explanation_result: 'Immigration policy has dozens of possible approaches. \"Compromise is doing nothing\" explicitly attacks the space where real policy lives. This technique shuts down policy discussion by making nuance feel like cowardice.',
-  },
-  {
-    id: 'conspiracy_framing',
-    quiz_topic: 'source_verification',
-    name: 'Conspiracy Framing',
-    icon: '🕵️',
-    color: '#60a5fa',
-    short: '\"They\" are hiding the truth from you',
-    explanation: 'This technique positions information as suppressed truth that powerful forces don\'t want you to know. It\'s designed to make the claim unfalsifiable: if you can\'t find evidence, it\'s because \"they\" hid it; if an expert disagrees, they\'re part of the cover-up.',
-    why: 'Conspiracy framing is psychologically powerful because it makes the believer feel special (you know the truth), creates an in-group, and explains away all counter-evidence. The more you try to disprove it, the more \"proof\" it becomes.',
-    vaccine_example: '\"What the mainstream media doesn\'t want you to know: 5G towers are linked to a 300% increase in neurological disorders. The WHO, telecom companies, and governments are all in on it. Notice how this never gets covered? That\'s not an accident.\"',
-    vaccine_signals: ['\"Doesn\'t want you to know\" — suppression framing', 'Multiple institutions all colluding', '\"That\'s not an accident\" — absence of coverage as proof', 'No source cited — secrecy explains why'],
-    exercise_example: '\"Doctors know that this common kitchen ingredient reverses diabetes completely. They\'re not telling patients because it would destroy the $327 billion diabetes drug industry. They need you sick. Your doctor profits from your illness. Do your own research.\"',
-    exercise_label: 'Which manipulation technique is driving this post?',
-    correct_id: 'conspiracy_framing',
-    explanation_result: '\"They need you sick\" is the core conspiracy claim. \"Do your own research\" means \"distrust experts and rely on unvetted online sources.\" The unfalsifiability is built in: if your doctor says it\'s false, that proves they\'re part of the conspiracy.',
-  },
-  {
-    id: 'impersonation',
-    quiz_topic: 'source_verification',
-    name: 'Source Impersonation',
-    icon: '🎭',
-    color: '#34d399',
-    short: 'Fake sources that look real',
-    explanation: 'This technique creates or uses sources that mimic legitimate media organizations, government agencies, or scientific bodies. It could be a Facebook page with a logo similar to a real news outlet, a URL like \"cnn-news24.net\", or a screenshot taken out of context.',
-    why: 'We trust known brand names. Impersonation exploits brand recognition — you see \"CNN\" or \"Department of Health\" and your guard drops before you check whether it\'s actually real. Screenshots are especially effective because the original source is hard to verify.',
-    vaccine_example: '[A screenshot shows what appears to be a Reuters headline: \"Philippines DOH Confirms Vaccine Causes 50,000 Deaths — Immediate Recall Ordered\" — but the font is slightly different and the URL bar shows reuters-ph-news.blogspot.com]',
-    vaccine_signals: ['Well-known brand name (Reuters) for trust', 'URL is NOT reuters.com', 'Sensational claim Reuters would never publish this way', 'Screenshot format makes URL hard to see'],
-    exercise_example: '\"According to the ABS-CBN News Facebook page: \'President Signs Emergency Order Banning All Imports Effective This Week\'\' [The post comes from a page called \"ABS-CBN News — Philippines Updates\" with 892 followers, not verified]',
-    exercise_label: 'What technique is this content using?',
-    correct_id: 'impersonation',
-    explanation_result: 'The real ABS-CBN News page has millions of followers and a blue verification checkmark. \"892 followers\" and \"no verification\" are the tells. Always check the exact page name, follower count, and verification status before trusting breaking news.',
-  },
-];
+// ══ PRE-TEST / POST-TEST ══════════════════════════════════════════════════════
 
-const PB_OPTIONS_ALL = [
-  {id:'emotional_override', label:'Emotional Override'},
-  {id:'false_authority', label:'False Authority'},
-  {id:'cherry_pick', label:'Cherry-Picked Statistics'},
-  {id:'false_dichotomy', label:'False Dichotomy'},
-  {id:'conspiracy_framing', label:'Conspiracy Framing'},
-  {id:'impersonation', label:'Source Impersonation'},
-];
+const PT_CLAIMS = []; // populated from GET /quiz/pretest
 
-// ── State ─────────────────────────────────────────────────────────────────────
-const PB_STORAGE_KEY = 'sp_prebunking_progress';
-let pbProgress = JSON.parse(sessionStorage.getItem(PB_STORAGE_KEY) || '{}');
-let pbActiveTech = null;
-let pbSelectedOption = null;
-// DB question counts per technique (loaded once on init)
-let pbQuestionCounts = {};
+// ── Shared helpers ────────────────────────────────────────────────────────────
+function ptGetSession() {
+  return sessionStorage.getItem('sp_session') || 'anonymous';
+}
+function ptGetUserId() {
+  const id = localStorage.getItem('sp_user_id');
+  return id ? parseInt(id) : null;
+}
+function ptShowOverlay(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = 'flex';
+}
+function ptHideOverlay(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = 'none';
+}
 
-function pbGetProgress(id) { return pbProgress[id] || {phase:'vaccine', correct:null, tried:false}; }
-function pbSaveProgress(id, data) {
-  pbProgress[id] = data;
-  sessionStorage.setItem(PB_STORAGE_KEY, JSON.stringify(pbProgress));
-  const tok = sessionStorage.getItem('sp_session') || '';
-  const uid = localStorage.getItem('sp_user_id') ? parseInt(localStorage.getItem('sp_user_id')) : null;
-  if (tok && data.phase === 'done') {
-    fetch(`${API_BASE}/prebunking/attempt`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ session_token: tok, user_id: uid, technique_id: id, correct: data.correct })
-    }).catch(()=>{});
+// ══ PRETEST ═══════════════════════════════════════════════════════════════════
+
+async function initPretest() {
+  if (localStorage.getItem('sp_pretest_done'))    return; // already completed
+  // Pretest is non-negotiable — cannot be skipped
+
+  let claims = [];
+  try {
+    const r = await fetch(`${API_BASE}/quiz/pretest`, { credentials: 'include' });
+    if (!r.ok) return;
+    const d = await r.json();
+    claims = d.claims || [];
+  } catch(e) { return; }
+
+  if (!claims.length) return;
+  PT_CLAIMS.length = 0;
+  PT_CLAIMS.push(...claims.slice(0, 5)); // cap at 5 — keep it frictionless
+
+  renderPretestModal();
+  ptShowOverlay('sp-pretest-overlay');
+}
+
+let _ptStep = 0; // current stepper index for pretest
+
+function renderPretestModal() {
+  _ptStep = 0;
+  const body = document.getElementById('sp-pretest-modal-body');
+  if (!body) return;
+  _renderPretestStep(body);
+}
+
+function _renderPretestStep(body) {
+  const total = PT_CLAIMS.length;
+  const c = PT_CLAIMS[_ptStep];
+  if (!c) return;
+  const isLast = _ptStep === total - 1;
+  const allAnswered = PT_CLAIMS.every(cl => ptAnswers[cl.id] !== undefined);
+  const qtype = c.question_type || 'true_false';
+
+  body.innerHTML = `
+    <div style="text-align:center;margin-bottom:1.25rem;">
+      <div style="font-size:2rem;margin-bottom:.4rem;">🧭</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:1.3rem;margin-bottom:.3rem;">Help us help you</div>
+      <div style="color:var(--muted);font-size:.82rem;line-height:1.5;">Answer as best you can — we track your progress over time.</div>
+    </div>
+
+    <!-- Stepper dots -->
+    <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:1.5rem;">
+      ${PT_CLAIMS.map((cl, i) => `
+        <div style="width:${i === _ptStep ? '24px' : '8px'};height:8px;border-radius:4px;
+             background:${ptAnswers[cl.id] !== undefined ? 'var(--green)' : i === _ptStep ? 'var(--accent)' : 'var(--border)'};
+             transition:all .25s;"></div>
+      `).join('')}
+    </div>
+
+    <div style="font-family:'DM Mono',monospace;font-size:.65rem;color:var(--accent);letter-spacing:.08em;margin-bottom:.5rem;">
+      QUESTION ${_ptStep + 1} OF ${total}
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.25rem 1.3rem;margin-bottom:1.25rem;">
+      ${_renderQuestionMedia(c)}
+      <div style="font-size:.95rem;line-height:1.65;color:var(--text);">${c.text}</div>
+    </div>
+
+    ${_ptRenderInput(c)}
+
+    <!-- Navigation -->
+    <div style="display:flex;gap:.75rem;align-items:stretch;margin-top:1.25rem;">
+      ${_ptStep > 0 ? `
+        <button onclick="_ptBack()"
+          style="flex:1;padding:.75rem;border-radius:10px;border:1px solid var(--border);background:transparent;
+                 color:var(--muted);font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;cursor:pointer;text-align:center;">
+          ← Back
+        </button>` : '<div style="flex:1;"></div>'}
+      ${isLast ? `
+        <button id="pt-submit-btn" onclick="submitPretest()" ${allAnswered ? '' : 'disabled'}
+          style="flex:1;padding:.75rem;border-radius:10px;border:none;background:var(--accent);color:#fff;
+                 font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;
+                 opacity:${allAnswered ? '1' : '.4'};cursor:${allAnswered ? 'pointer' : 'not-allowed'};transition:all .2s;text-align:center;">
+          Submit Answers →
+        </button>` : `
+        <button onclick="_ptNext()" ${ptAnswers[c.id] !== undefined ? '' : 'disabled'}
+          style="flex:1;padding:.75rem;border-radius:10px;border:none;
+                 background:${ptAnswers[c.id] !== undefined ? 'var(--accent)' : 'var(--surface)'};
+                 color:${ptAnswers[c.id] !== undefined ? '#fff' : 'var(--muted)'};
+                 font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;
+                 cursor:${ptAnswers[c.id] !== undefined ? 'pointer' : 'not-allowed'};transition:all .2s;
+                 border:1px solid ${ptAnswers[c.id] !== undefined ? 'transparent' : 'var(--border)'};text-align:center;">
+          Next →
+        </button>`}
+    </div>
+    <div style="text-align:center;margin-top:.75rem;color:var(--muted);font-size:.72rem;font-family:'DM Mono',monospace;letter-spacing:.03em;">
+      Complete the pretest to unlock lessons
+    </div>`;
+}
+
+function _ptRenderInput(c) {
+  const qtype = c.question_type || 'true_false';
+  const ans   = ptAnswers[c.id];
+
+  if (qtype === 'true_false') {
+    return `<div style="display:flex;gap:.75rem;">
+      <button onclick="ptSelectStepper(${c.id},'True')"
+        style="flex:1;padding:.75rem .5rem;border-radius:10px;border:1.5px solid ${ans==='True'?'var(--accent)':'var(--border)'};
+               background:${ans==='True'?'rgba(79,142,247,.15)':'transparent'};
+               color:${ans==='True'?'var(--accent)':'var(--text)'};
+               font-family:'DM Mono',monospace;font-size:.85rem;font-weight:600;cursor:pointer;transition:all .2s;box-sizing:border-box;text-align:center;">
+        ✓ True
+      </button>
+      <button onclick="ptSelectStepper(${c.id},'False')"
+        style="flex:1;padding:.75rem .5rem;border-radius:10px;border:1.5px solid ${ans==='False'?'var(--accent)':'var(--border)'};
+               background:${ans==='False'?'rgba(79,142,247,.15)':'transparent'};
+               color:${ans==='False'?'var(--accent)':'var(--text)'};
+               font-family:'DM Mono',monospace;font-size:.85rem;font-weight:600;cursor:pointer;transition:all .2s;box-sizing:border-box;text-align:center;">
+        ✗ False
+      </button>
+    </div>`;
+  }
+
+  if (qtype === 'yes_no') {
+    return `<div style="display:flex;gap:.5rem;">
+      ${['Yes','No','Unsure'].map(v => `
+        <button onclick="ptSelectStepper(${c.id},'${v}')"
+          style="flex:1;padding:.7rem .4rem;border-radius:10px;border:1.5px solid ${ans===v?'var(--accent)':'var(--border)'};
+                 background:${ans===v?'rgba(79,142,247,.15)':'transparent'};
+                 color:${ans===v?'var(--accent)':'var(--text)'};
+                 font-family:'DM Mono',monospace;font-size:.8rem;font-weight:600;cursor:pointer;transition:all .2s;">
+          ${v}
+        </button>`).join('')}
+    </div>`;
+  }
+
+  if (qtype === 'multiple_choice') {
+    let opts = [];
+    try { opts = JSON.parse(c.options || '[]'); } catch(_) {}
+    return `<div style="display:flex;flex-direction:column;gap:.5rem;">
+      ${opts.map((opt, idx) => `
+        <button onclick="ptSelectStepper(${c.id},'${idx}')"
+          style="padding:.7rem .9rem;border-radius:10px;text-align:left;border:1.5px solid ${String(ans)===String(idx)?'var(--accent)':'var(--border)'};
+                 background:${String(ans)===String(idx)?'rgba(79,142,247,.1)':'transparent'};
+                 color:${String(ans)===String(idx)?'var(--accent)':'var(--text)'};font-size:.88rem;cursor:pointer;transition:all .2s;">
+          <span style="font-family:'DM Mono',monospace;font-size:.7rem;opacity:.6;margin-right:.5rem;">${String.fromCharCode(65+idx)}.</span>
+          ${opt}
+        </button>`).join('')}
+    </div>`;
+  }
+
+  if (qtype === 'scale') {
+    const cur = ans !== undefined ? ans : '3';
+    return `<div>
+      <input type="range" min="1" max="5" value="${cur}" id="pt-scale-${c.id}"
+        oninput="ptSelectStepper(${c.id}, this.value); document.getElementById('pt-scale-lbl-${c.id}').textContent=this.value"
+        style="width:100%;accent-color:var(--accent);">
+      <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--muted);margin-top:.35rem;">
+        <span>1 — Strongly Disagree</span>
+        <span id="pt-scale-lbl-${c.id}" style="color:var(--accent);font-weight:700">${cur}</span>
+        <span>5 — Strongly Agree</span>
+      </div>
+    </div>`;
+  }
+
+  // open-ended
+  return `<textarea id="pt-open-${c.id}" rows="3"
+    placeholder="Type your answer…"
+    oninput="ptSelectStepper(${c.id}, this.value)"
+    style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:10px;
+           padding:.65rem .85rem;color:var(--text);font-size:.88rem;resize:vertical;">${ans||''}</textarea>`;
+}
+
+function ptSelectStepper(id, value) {
+  ptAnswers[id] = value;
+  const body = document.getElementById('sp-pretest-modal-body');
+  if (body) _renderPretestStep(body);
+}
+
+function _ptNext() {
+  if (_ptStep < PT_CLAIMS.length - 1) {
+    _ptStep++;
+    const body = document.getElementById('sp-pretest-modal-body');
+    if (body) _renderPretestStep(body);
   }
 }
 
-// ── Render helpers ────────────────────────────────────────────────────────────
-function pbRenderProgress() {
-  const track = document.getElementById('pb-progress-track');
-  if (!track) return;
-  const doneCount = TECHNIQUES.filter(t => pbGetProgress(t.id).tried).length;
-  track.innerHTML = TECHNIQUES.map(t => {
-    const p = pbGetProgress(t.id);
-    const cls = p.tried ? (p.correct ? 'done' : 'done') : (pbActiveTech === t.id ? 'active' : '');
-    return `<div class="prog-dot ${cls}" title="${t.name}"></div>`;
-  }).join('');
-  document.getElementById('pb-prog-text').innerHTML =
-    `Technique <strong>${doneCount}</strong> of <strong>${TECHNIQUES.length}</strong> attempted`;
-  pbUpdateScore();
+function _ptBack() {
+  if (_ptStep > 0) {
+    _ptStep--;
+    const body = document.getElementById('sp-pretest-modal-body');
+    if (body) _renderPretestStep(body);
+  }
 }
 
-function pbUpdateScore() {
-  const tried = TECHNIQUES.filter(t => pbGetProgress(t.id).tried);
-  const correct = tried.filter(t => pbGetProgress(t.id).correct).length;
-  const pct = tried.length ? Math.round((correct / tried.length) * 100) : 0;
-  const offset = 188 - (188 * pct / 100);
-  const ring = document.getElementById('pb-ring-fill');
-  if (ring) ring.style.strokeDashoffset = offset;
-  const valEl = document.getElementById('pb-overall-val');
-  const subEl = document.getElementById('pb-overall-sub');
-  if (valEl) valEl.textContent = tried.length ? `${pct}%` : '—';
-  if (subEl) subEl.textContent = tried.length
-    ? `${correct} of ${tried.length} exercises correct`
-    : 'Complete exercises to build resistance';
+const ptAnswers = {}; // { claim_id: answer }
+
+function ptSelect(id, value) {
+  ptSelectStepper(id, value);
 }
 
-function pbStatusBadge(p) {
-  if (!p.tried) return '<span style="font-size:.65rem;font-family:\'DM Mono\',monospace;color:var(--muted);">start →</span>';
-  if (p.correct) return '<span style="font-size:.65rem;font-family:\'DM Mono\',monospace;color:var(--green);">✓ Correct</span>';
-  return '<span style="font-size:.65rem;font-family:\'DM Mono\',monospace;color:var(--red);">✗ Tried</span>';
+async function submitPretest() {
+  const payload = {
+    session_token: ptGetSession(),
+    user_id:       ptGetUserId(),
+    answers:       {},
+  };
+  PT_CLAIMS.forEach(c => { payload.answers[c.id] = ptAnswers[c.id] || ''; });
+
+  const btn = document.getElementById('pt-submit-btn');
+  if (btn) { btn.textContent = 'Submitting…'; btn.disabled = true; }
+
+  try {
+    const r = await fetch(`${API_BASE}/quiz/pretest/submit`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error('server error');
+    const data = await r.json();
+    localStorage.setItem('sp_pretest_done',  'true');
+    localStorage.setItem('sp_pretest_score', String(data.score_pct ?? ''));
+    renderPretestResult(data);
+  } catch(e) {
+    // Fail gracefully — store flag and close so the user isn't blocked
+    localStorage.setItem('sp_pretest_done', 'true');
+    ptHideOverlay('sp-pretest-overlay');
+  }
 }
 
-function pbRenderTechList() {
+function renderPretestResult(data) {
+  const body = document.getElementById('sp-pretest-modal-body');
+  if (!body) return;
+  body.innerHTML = `
+    <div style="text-align:center;padding:.5rem 0 1.5rem;">
+      <div style="font-size:2.5rem;margin-bottom:.6rem;">✅</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:1.4rem;margin-bottom:.3rem;">Baseline recorded!</div>
+      <div style="color:var(--muted);font-size:.84rem;line-height:1.6;max-width:360px;margin:.75rem auto .5rem;">
+        Thanks — that's all we need. Finish the lessons and we'll show you exactly how much you've improved.
+      </div>
+    </div>
+    <button onclick="ptHideOverlay('sp-pretest-overlay')"
+      style="width:100%;padding:.8rem;border-radius:12px;border:none;background:var(--accent);color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.95rem;cursor:pointer;">
+      Start Learning →
+    </button>`;
+}
+
+function ptSkip() {
+  // Suppress for the rest of this browser session only; shows again on next visit
+  sessionStorage.setItem('sp_pretest_skipped', 'true');
+  ptHideOverlay('sp-pretest-overlay');
+}
+
+// ══ POSTTEST ══════════════════════════════════════════════════════════════════
+
+let _posttestTriggered = false;
+
+function checkPosttestTrigger() {
+  if (_posttestTriggered)                         return;
+  if (!localStorage.getItem('sp_pretest_done'))   return; // pretest must come first
+  if (localStorage.getItem('sp_posttest_done'))   return; // already completed
+  if (typeof TECHNIQUES === 'undefined') return;
+  const allTried = TECHNIQUES.every(t => pbGetProgress(t.id).tried);
+  if (!allTried) return;
+
+  _posttestTriggered = true;
+  injectPosttestBanner();
+}
+
+function injectPosttestBanner() {
+  // Avoid duplicate banners
+  if (document.getElementById('sp-posttest-banner')) return;
+
   const area = document.getElementById('pb-module-area');
   if (!area) return;
-  const tech = TECHNIQUES.find(t => t.id === pbActiveTech);
-  if (!tech) {
-    area.innerHTML = `
-      <div class="module-card">
-        <div class="phase-badge phase-vaccine">Choose a technique</div>
-        <div class="module-title">Select a manipulation technique to study</div>
-        <div class="module-desc">Each module has two phases: first you learn the technique with a clearly labeled example (the vaccine), then you identify it in an unlabeled real example (the exercise).</div>
-        <div class="techniques-grid">
-          ${TECHNIQUES.map(t => {
-            const p = pbGetProgress(t.id);
-            return `<button class="technique-chip ${p.tried?'completed':''}" onclick="pbStartTech('${t.id}')">
-              <div class="tech-icon" style="background:${t.color}22">${t.icon}</div>
-              <div><div class="tech-name">${t.name}</div><div class="tech-sub">${t.short}</div></div>
-              <div class="tech-status">${pbStatusBadge(p)}</div>
-            </button>`;
-          }).join('')}
-        </div>
-      </div>`;
+
+  const banner = document.createElement('div');
+  banner.id = 'sp-posttest-banner';
+  banner.style.cssText = [
+    'margin-top:2rem',
+    'padding:1.5rem 1.75rem',
+    'background:linear-gradient(135deg,rgba(79,142,247,.08),rgba(139,92,246,.08))',
+    'border:1px solid rgba(79,142,247,.3)',
+    'border-radius:16px',
+    'text-align:center',
+  ].join(';');
+  banner.innerHTML = `
+    <div style="font-size:1.8rem;margin-bottom:.5rem;">🏆</div>
+    <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;margin-bottom:.4rem;">
+      You've completed all the lessons!
+    </div>
+    <div style="color:var(--muted);font-size:.88rem;line-height:1.6;margin-bottom:1.1rem;max-width:400px;margin-left:auto;margin-right:auto;">
+      Ready to see how far you've come? Take the post-test and we'll show you your before vs. after score.
+    </div>
+    <button onclick="openPosttest()"
+      style="padding:.7rem 1.8rem;border-radius:10px;border:none;background:var(--accent);color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;cursor:pointer;transition:all .2s;">
+      Reveal my improvement →
+    </button>`;
+  area.appendChild(banner);
+}
+
+function renderPosttestLoginPrompt() {
+  const body = document.getElementById('sp-posttest-modal-body');
+  if (!body) return;
+  body.innerHTML = `
+    <div style="text-align:center;padding:.5rem 0 1.5rem;">
+      <div style="font-size:2.5rem;margin-bottom:.6rem;">🏆</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:1.4rem;margin-bottom:.4rem;">See how much you've improved</div>
+      <div style="color:var(--muted);font-size:.88rem;line-height:1.6;max-width:340px;margin:0 auto 1.25rem;">
+        Create a free account to take the post-test and unlock your before vs. after score comparison.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:.65rem;max-width:300px;margin:0 auto;">
+        <a href="login.html#register"
+          style="display:block;padding:.8rem;border-radius:12px;border:none;background:var(--accent);color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.95rem;text-decoration:none;text-align:center;">
+          Create an account →
+        </a>
+        <a href="login.html"
+          style="display:block;padding:.75rem;border-radius:12px;border:1px solid var(--border);background:transparent;color:var(--text);font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;text-decoration:none;text-align:center;">
+          Log in
+        </a>
+        <button onclick="ptHideOverlay('sp-posttest-overlay')"
+          style="background:none;border:none;color:var(--muted);font-size:.75rem;cursor:pointer;font-family:'DM Mono',monospace;letter-spacing:.03em;padding:.4rem;">
+          Maybe later
+        </button>
+      </div>
+    </div>`;
+}
+
+async function openPosttest() {
+  // Post-test requires login so scores can be linked and delta calculated
+  const userId = localStorage.getItem('sp_user_id');
+  if (!userId) {
+    renderPosttestLoginPrompt();
+    ptShowOverlay('sp-posttest-overlay');
     return;
   }
-  const p = pbGetProgress(tech.id);
-  if (p.phase === 'vaccine' || p.phase === undefined) pbRenderVaccine(tech);
-  else if (p.phase === 'exercise') pbRenderExercise(tech);
-  else pbRenderResult(tech, p.correct);
-}
-
-function pbStartTech(id) {
-  pbActiveTech = id;
-  pbSelectedOption = null;
-  // Reset to vaccine phase if they want to re-study (but keep tried/correct for score)
-  const p = pbGetProgress(id);
-  if (p.phase === 'done') {
-    // Allow re-attempt: reset to exercise phase with a new DB question
-    pbProgress[id] = { phase:'exercise', correct: null, tried: true };
-    sessionStorage.setItem(PB_STORAGE_KEY, JSON.stringify(pbProgress));
+  if (!PT_CLAIMS.length) {
+    try {
+      const r = await fetch(`${API_BASE}/quiz/pretest`, { credentials: 'include' });
+      if (!r.ok) return;
+      const d = await r.json();
+      PT_CLAIMS.push(...(d.claims || []));
+    } catch(e) { return; }
   }
-  pbRenderProgress();
-  pbRenderTechList();
+  renderPosttestModal();
+  ptShowOverlay('sp-posttest-overlay');
 }
 
-function pbRenderVaccine(tech) {
-  const area = document.getElementById('pb-module-area');
-  area.innerHTML = `
-    <div class="module-card">
-      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem;">
-        <button onclick="pbGoBack()" style="background:transparent;border:1px solid var(--border);border-radius:7px;padding:.3rem .65rem;color:var(--muted);cursor:pointer;font-size:.78rem;">← Back</button>
-        <span class="phase-badge phase-vaccine">Phase 1 — Vaccine</span>
-      </div>
-      <div class="module-title">${tech.icon} ${tech.name}</div>
-      <div class="module-desc">${tech.explanation}</div>
-      <div class="why-box"><div class="why-label">Why it works</div><div class="why-text">${tech.why}</div></div>
-      <div style="margin-top:1.5rem;">
-        <div class="vaccine-label">⚠ Labeled example of this technique:</div>
-        <div class="example-box">
-          <div class="example-text">${tech.vaccine_example}</div>
-          <div class="example-annotation">${tech.vaccine_signals.map(s=>`<span class="annotation-tag">${s}</span>`).join('')}</div>
+const pttAnswers = {}; // { claim_id: 'True' | 'False' }
+
+let _pttStep = 0; // current stepper index for posttest
+
+function renderPosttestModal() {
+  // Clear any stale answers from a previous attempt
+  Object.keys(pttAnswers).forEach(k => delete pttAnswers[k]);
+  _pttStep = 0;
+  const body = document.getElementById('sp-posttest-modal-body');
+  if (body) _renderPosttestStep(body);
+}
+
+function _renderPosttestStep(body) {
+  const total = PT_CLAIMS.length;
+  const c = PT_CLAIMS[_pttStep];
+  const isLast = _pttStep === total - 1;
+  const allAnswered = Object.keys(pttAnswers).length === total;
+  const preScore = localStorage.getItem('sp_pretest_score');
+  const preHint  = preScore ? `Your baseline was <strong>${preScore}%</strong>` : '';
+
+  body.innerHTML = `
+    <div style="text-align:center;margin-bottom:1.25rem;">
+      <div style="font-size:2rem;margin-bottom:.4rem;">🧠</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:1.3rem;margin-bottom:.3rem;">Time to see your growth</div>
+      ${preHint ? `<div style="color:var(--muted);font-size:.8rem;">${preHint}</div>` : ''}
+    </div>
+
+    <!-- Stepper dots -->
+    <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:1.5rem;">
+      ${PT_CLAIMS.map((cl, i) => `
+        <div style="width:${i === _pttStep ? '24px' : '8px'};height:8px;border-radius:4px;
+             background:${pttAnswers[cl.id] ? 'var(--green)' : i === _pttStep ? 'var(--accent)' : 'var(--border)'};
+             transition:all .25s;"></div>
+      `).join('')}
+    </div>
+
+    <!-- Question label -->
+    <div style="font-family:'DM Mono',monospace;font-size:.65rem;color:var(--accent);letter-spacing:.08em;margin-bottom:.5rem;">
+      QUESTION ${_pttStep + 1} OF ${total}
+    </div>
+
+    <!-- Question card -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.25rem 1.3rem;margin-bottom:1.25rem;min-height:90px;display:flex;align-items:center;">
+      <div style="font-size:.95rem;line-height:1.65;color:var(--text);">${c.text}</div>
+    </div>
+
+    <!-- True / False buttons -->
+    <div style="display:flex;gap:.75rem;margin-bottom:1.5rem;">
+      <button id="ptt-true-${c.id}" onclick="pttSelectStepper(${c.id},'True')"
+        style="flex:1;padding:.75rem .5rem;border-radius:10px;border:1.5px solid ${pttAnswers[c.id]==='True'?'var(--accent)':'var(--border)'};
+               background:${pttAnswers[c.id]==='True'?'rgba(79,142,247,.15)':'transparent'};
+               color:${pttAnswers[c.id]==='True'?'var(--accent)':'var(--text)'};
+               font-family:'DM Mono',monospace;font-size:.85rem;font-weight:600;cursor:pointer;transition:all .2s;box-sizing:border-box;text-align:center;">
+        ✓ True
+      </button>
+      <button id="ptt-false-${c.id}" onclick="pttSelectStepper(${c.id},'False')"
+        style="flex:1;padding:.75rem .5rem;border-radius:10px;border:1.5px solid ${pttAnswers[c.id]==='False'?'var(--accent)':'var(--border)'};
+               background:${pttAnswers[c.id]==='False'?'rgba(79,142,247,.15)':'transparent'};
+               color:${pttAnswers[c.id]==='False'?'var(--accent)':'var(--text)'};
+               font-family:'DM Mono',monospace;font-size:.85rem;font-weight:600;cursor:pointer;transition:all .2s;box-sizing:border-box;text-align:center;">
+        ✗ False
+      </button>
+    </div>
+
+    <!-- Navigation -->
+    <div style="display:flex;gap:.75rem;align-items:center;">
+      ${_pttStep > 0 ? `
+        <button onclick="_pttBack()"
+          style="flex:1;padding:.7rem;border-radius:10px;border:1px solid var(--border);background:transparent;
+                 color:var(--muted);font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;cursor:pointer;">
+          ← Back
+        </button>` : '<div style="flex:1;"></div>'}
+      ${isLast ? `
+        <button id="ptt-submit-btn" onclick="submitPosttest()" ${allAnswered ? '' : 'disabled'}
+          style="flex:2;padding:.75rem;border-radius:10px;border:none;background:var(--accent);color:#fff;
+                 font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;
+                 opacity:${allAnswered ? '1' : '.4'};cursor:${allAnswered ? 'pointer' : 'not-allowed'};transition:all .2s;">
+          Submit & See Results →
+        </button>` : `
+        <button onclick="_pttNext()" ${pttAnswers[c.id] ? '' : 'disabled'}
+          style="flex:2;padding:.75rem;border-radius:10px;border:none;
+                 background:${pttAnswers[c.id] ? 'var(--accent)' : 'var(--surface)'};
+                 color:${pttAnswers[c.id] ? '#fff' : 'var(--muted)'};
+                 font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;
+                 cursor:${pttAnswers[c.id] ? 'pointer' : 'not-allowed'};transition:all .2s;
+                 border:1px solid ${pttAnswers[c.id] ? 'transparent' : 'var(--border)'}>
+          Next →
+        </button>`}
+    </div>`;
+}
+
+function pttSelectStepper(id, value) {
+  pttAnswers[id] = value;
+  const body = document.getElementById('sp-posttest-modal-body');
+  if (body) _renderPosttestStep(body);
+}
+
+function _pttNext() {
+  if (_pttStep < PT_CLAIMS.length - 1) {
+    _pttStep++;
+    const body = document.getElementById('sp-posttest-modal-body');
+    if (body) _renderPosttestStep(body);
+  }
+}
+
+function _pttBack() {
+  if (_pttStep > 0) {
+    _pttStep--;
+    const body = document.getElementById('sp-posttest-modal-body');
+    if (body) _renderPosttestStep(body);
+  }
+}
+
+function pttSelect(id, value) {
+  pttAnswers[id] = value;
+
+  const trueBtn  = document.getElementById(`ptt-true-${id}`);
+  const falseBtn = document.getElementById(`ptt-false-${id}`);
+  if (!trueBtn || !falseBtn) return;
+
+  [trueBtn, falseBtn].forEach(btn => {
+    btn.style.borderColor = 'var(--border)';
+    btn.style.background  = 'transparent';
+    btn.style.color       = 'var(--text)';
+  });
+  const picked = value === 'True' ? trueBtn : falseBtn;
+  picked.style.borderColor = 'var(--accent)';
+  picked.style.background  = 'rgba(79,142,247,.15)';
+  picked.style.color       = 'var(--accent)';
+
+  if (Object.keys(pttAnswers).length === PT_CLAIMS.length) {
+    const btn = document.getElementById('ptt-submit-btn');
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer'; }
+  }
+}
+
+async function submitPosttest() {
+  const preScore = parseInt(localStorage.getItem('sp_pretest_score') || '0') || null;
+  const payload  = {
+    session_token: ptGetSession(),
+    user_id:       ptGetUserId(),
+    answers:       {},
+    pretest_score: preScore,
+  };
+  PT_CLAIMS.forEach(c => { payload.answers[c.id] = pttAnswers[c.id] || ''; });
+
+  const btn = document.getElementById('ptt-submit-btn');
+  if (btn) { btn.textContent = 'Submitting…'; btn.disabled = true; }
+
+  try {
+    const r = await fetch(`${API_BASE}/quiz/posttest/submit`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error('server error');
+    const data = await r.json();
+    localStorage.setItem('sp_posttest_done',  'true');
+    localStorage.setItem('sp_posttest_score', String(data.score_pct ?? ''));
+    renderPosttestResult(data);
+  } catch(e) {
+    localStorage.setItem('sp_posttest_done', 'true');
+    ptHideOverlay('sp-posttest-overlay');
+  }
+}
+
+function renderPosttestResult(data) {
+  const body = document.getElementById('sp-posttest-modal-body');
+  if (!body) return;
+
+  const pct      = data.score_pct ?? 0;
+  const delta    = data.delta;      // may be null if no pretest on record server-side
+  const improved = typeof delta === 'number' && delta > 0;
+  const prePct   = parseInt(localStorage.getItem('sp_pretest_score') || '0');
+
+  // Delta comparison strip — only shown when the server returns a delta
+  let deltaHtml = '';
+  if (typeof delta === 'number') {
+    const dColor = delta > 0 ? 'var(--green)' : delta < 0 ? 'var(--red)' : 'var(--muted)';
+    const dSign  = delta > 0 ? '+' : '';
+    const dMsg   = delta > 0
+      ? '🎉 You improved — great work!'
+      : delta < 0
+        ? '📖 Keep practising — the lessons are always here.'
+        : '➡️ Same score — keep building with the quiz!';
+
+    deltaHtml = `
+      <div style="display:flex;gap:.75rem;justify-content:center;align-items:stretch;margin:.85rem 0 .5rem;flex-wrap:wrap;">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.6rem 1.2rem;text-align:center;min-width:80px;">
+          <div style="font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.08em;margin-bottom:.25rem;">PRE-TEST</div>
+          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.25rem;">${prePct}%</div>
+        </div>
+        <div style="display:flex;align-items:center;font-size:1.2rem;color:var(--muted);">→</div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.6rem 1.2rem;text-align:center;min-width:80px;">
+          <div style="font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.08em;margin-bottom:.25rem;">POST-TEST</div>
+          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.25rem;">${pct}%</div>
+        </div>
+        <div style="display:flex;align-items:center;font-size:1.2rem;color:var(--muted);">→</div>
+        <div style="background:${dColor}22;border:1px solid ${dColor}55;border-radius:10px;padding:.6rem 1.2rem;text-align:center;min-width:80px;">
+          <div style="font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.08em;margin-bottom:.25rem;">CHANGE</div>
+          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.25rem;color:${dColor};">${dSign}${delta}%</div>
         </div>
       </div>
-      <div class="btn-row">
-        <button class="btn btn-primary" onclick="pbAdvanceToExercise('${tech.id}')">I understand this technique →</button>
+      <div style="color:var(--muted);font-size:.83rem;margin-bottom:.85rem;">${dMsg}</div>`;
+  }
+
+  body.innerHTML = `
+    <div style="text-align:center;padding:.5rem 0 .75rem;">
+      <div style="font-size:2.5rem;margin-bottom:.5rem;">${improved ? '🏆' : '📊'}</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:1.4rem;margin-bottom:.3rem;">Post-test complete!</div>
+      ${deltaHtml}
+      <div style="color:var(--muted);font-size:.83rem;line-height:1.6;max-width:360px;margin:0 auto .9rem;">
+        Your full results are on the dashboard. Keep practising with the quiz to keep building your skills.
       </div>
+    </div>
+    <div style="display:flex;gap:.75rem;justify-content:center;flex-wrap:wrap;">
+      <button onclick="ptHideOverlay('sp-posttest-overlay')"
+        style="padding:.7rem 1.4rem;border-radius:10px;border:none;background:var(--accent);color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;cursor:pointer;">
+        Done
+      </button>
+      <a href="dashboard.html"
+        style="display:inline-flex;align-items:center;gap:.35rem;padding:.7rem 1.4rem;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--text);font-family:'Syne',sans-serif;font-weight:600;font-size:.9rem;text-decoration:none;">
+        View Dashboard →
+      </a>
     </div>`;
+  const banner = document.getElementById('sp-posttest-banner');
+  if (banner) {
+    banner.style.background   = 'rgba(52,211,153,.06)';
+    banner.style.borderColor  = 'rgba(52,211,153,.3)';
+    const dLabel = typeof delta === 'number'
+      ? ` (${delta >= 0 ? '+' : ''}${delta}% vs baseline)`
+      : '';
+    banner.innerHTML = `
+      <div style="color:var(--green);font-family:'Syne',sans-serif;font-weight:600;font-size:.95rem;">
+        ✓ Post-test completed — ${pct}% score${dLabel}
+      </div>`;
+  }
 }
 
-function pbAdvanceToExercise(id) {
-  const p = pbGetProgress(id);
-  pbProgress[id] = { phase:'exercise', correct: null, tried: p.tried || false };
-  sessionStorage.setItem(PB_STORAGE_KEY, JSON.stringify(pbProgress));
-  pbSelectedOption = null;
-  pbRenderTechList();
+// ── Patch pbRenderProgress so posttest is checked after every progress update ─
+if (typeof pbRenderProgress === 'function') {
+  const _origPbRenderProgress = pbRenderProgress;
+  pbRenderProgress = function () {
+    _origPbRenderProgress.call(this);
+    checkPosttestTrigger();
+  };
 }
 
-// ── Exercise: fetch a real quiz question for this technique's topic ────────────
-async function pbRenderExercise(tech) {
-  const area = document.getElementById('pb-module-area');
-  area.innerHTML = `
-    <div class="module-card">
-      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem;">
-        <button onclick="pbGoBack()" style="background:transparent;border:1px solid var(--border);border-radius:7px;padding:.3rem .65rem;color:var(--muted);cursor:pointer;font-size:.78rem;">← Back</button>
-        <span class="phase-badge phase-exercise">Phase 2 — Quiz</span>
-      </div>
-      <div class="module-title">Test your knowledge</div>
-      <div style="padding:1.5rem 0;text-align:center;font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted);">Loading question…</div>
-    </div>`;
+// ── Boot — small delay so page paint completes before the modal appears ────────
+setTimeout(initPretest, 450);
+// ══ END PRE-TEST / POST-TEST ══════════════════════════════════════════════════
 
-  const topic = tech.quiz_topic || 'source_verification';
-  let q = null;
+async function _loadQuizResultsStats() {
+  const container = document.getElementById('quiz-results-stats-container');
+  if (!container) return;
+  const userId = parseInt(localStorage.getItem('sp_user_id'));
+  if (!userId) {
+    container.innerHTML = '<p style="color:var(--muted);font-size:.8rem;text-align:center;">Log in to track your stats.</p>';
+    return;
+  }
   try {
-    const res = await fetch(`${API_BASE}/quiz?topic=${topic}&limit=5`, { credentials: 'include' });
-    if (res.ok) {
-      const questions = await res.json();
-      if (questions && questions.length) {
-        // Pick a random one from the batch for variety
-        q = questions[Math.floor(Math.random() * questions.length)];
-      }
-    }
-  } catch(e) {}
-
-  if (!q) {
-    // Use the technique's built-in hardcoded exercise as fallback
-    if (tech.exercise_example) {
-      const fallbackOptions = TECHNIQUES.map(t => t.name);
-      // Build A/B/C/D options: correct answer = this tech, others = 3 random techs
-      const others = TECHNIQUES.filter(t => t.id !== tech.id).sort(() => Math.random() - .5).slice(0, 3);
-      const allOpts = [{ id: tech.id, name: tech.name, correct: true }, ...others.map(t => ({ id: t.id, name: t.name, correct: false }))].sort(() => Math.random() - .5);
-      const correctIdx = allOpts.findIndex(o => o.correct);
-      pbRenderExerciseUI(tech, tech.exercise_label || 'What manipulation technique is this post using?', allOpts.map(o => o.name), correctIdx, `This is an example of <strong>${tech.name}</strong>. ${tech.short}`, null, tech.exercise_example);
+    const res = await fetch(`${API_BASE}/quiz/stats/${userId}`, { credentials: 'include' });
+    if (!res.ok) throw new Error();
+    const rows = await res.json();
+    if (!rows.length) {
+      container.innerHTML = '<p style="color:var(--muted);font-size:.8rem;text-align:center;">No stats yet.</p>';
       return;
     }
-    area.innerHTML = `
-      <div class="module-card">
-        <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem;">
-          <button onclick="pbGoBack()" style="background:transparent;border:1px solid var(--border);border-radius:7px;padding:.3rem .65rem;color:var(--muted);cursor:pointer;font-size:.78rem;">← Back</button>
-          <span class="phase-badge phase-exercise">Phase 2 — Quiz</span>
-        </div>
-        <div class="module-title">No questions available yet</div>
-        <div class="module-desc" style="color:var(--muted);">No quiz questions have been added for this topic. Ask your admin to add some in the dashboard.</div>
-        <div class="btn-row">
-          <button class="btn btn-primary" onclick="pbSaveProgress('${tech.id}', {phase:'done',correct:false,tried:true}); pbRenderProgress(); pbGoBack();">Mark as attempted</button>
-        </div>
+    container.innerHTML = rows.map(r => {
+      const pct = r.accuracy_pct ?? 0;
+      const c = pct >= 80 ? 'var(--green,#22c55e)' : pct >= 50 ? 'var(--yellow,#fbbf24)' : 'var(--red,#ef4444)';
+      const label = (r.topic || 'general').replace(/_/g,' ').replace(/\b\w/g, l => l.toUpperCase());
+      return `<div style="display:flex;align-items:center;gap:.75rem;font-size:.8rem;margin-bottom:.5rem;">
+        <span style="min-width:155px;color:var(--text);">${label}</span>
+        <div style="flex:1;height:6px;border-radius:3px;background:var(--border);overflow:hidden;"><div style="height:100%;width:${pct}%;background:${c};border-radius:3px;"></div></div>
+        <span style="min-width:40px;text-align:right;font-family:'DM Mono',monospace;color:${c};font-weight:600;">${pct}%</span>
+        <span style="color:var(--muted);min-width:48px;text-align:right;">${r.topic_correct}/${r.topic_attempts}</span>
       </div>`;
+    }).join('');
+  } catch {
+    container.innerHTML = '<p style="color:var(--muted);font-size:.8rem;text-align:center;">Could not load stats.</p>';
+  }
+}
+
+function quizRetry() {
+  document.getElementById('quiz-screen-results').style.display = 'none';
+  document.getElementById('quiz-screen-start').style.display = '';
+}
+
+
+// ══ LESSONS ADMIN PANEL ══════════════════════════════════════════════════════
+// Injected when the user is an admin. Adds: edit, deactivate, delete controls
+// on each lesson card, plus a floating "Add Lesson" button.
+
+const _isAdmin = localStorage.getItem('sp_role') === 'admin';
+
+function _getAuthHeader() {
+  const token = document.cookie.split(';').map(c => c.trim())
+    .find(c => c.startsWith('sp_jwt='));
+  if (token) return { Authorization: `Bearer ${token.split('=')[1]}` };
+  const ls = localStorage.getItem('sp_token');
+  if (ls) return { Authorization: `Bearer ${ls}` };
+  return {};
+}
+
+// ── Inject admin controls into lesson cards ──────────────────────────────────
+const _origRenderGrid = renderGrid;
+renderGrid = function(list) {
+  _origRenderGrid(list);
+  if (!_isAdmin) return;
+  // Add admin badge + controls to each card — read lesson id from data attribute
+  document.querySelectorAll('.lesson-card').forEach(card => {
+    const lessonId = parseInt(card.dataset.lessonId);
+    const lessonKey = card.dataset.lessonKey;
+    if (!lessonId) return;
+    const lesson = LESSONS.find(l => l.id === lessonId || l.key === lessonKey);
+    if (!lesson) return;
+    if (card.querySelector('.admin-lesson-controls')) return; // already injected
+
+    const isPub = lesson.is_published !== 0 && lesson.is_published !== false;
+    const bar = document.createElement('div');
+    bar.className = 'admin-lesson-controls';
+    bar.style.cssText = 'display:flex;gap:.35rem;justify-content:flex-end;margin-top:.6rem;padding-top:.5rem;border-top:1px solid var(--border)';
+    bar.innerHTML = `
+      <button class="btn btn-sm btn-icon" title="Edit" onclick="event.stopPropagation();adminEditLesson(${lesson.id})">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      </button>
+      <button class="btn btn-sm btn-icon" title="${isPub ? 'Deactivate' : 'Activate'}"
+        onclick="event.stopPropagation();adminToggleLesson(${lesson.id})"
+        style="color:${isPub ? 'var(--muted)' : 'var(--green)'}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px">
+          <path d="${isPub ? 'M18 6L6 18M6 6l12 12' : 'M20 6L9 17l-5-5'}"/>
+        </svg>
+      </button>
+      <button class="btn btn-sm btn-icon btn-danger" title="Delete" onclick="event.stopPropagation();adminDeleteLesson(${lesson.id},'${(lesson.title||'').replace(/'/g,"\\'").replace(/"/g,'\\"')}')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+      </button>`;
+    card.appendChild(bar);
+  });
+  // Inject floating "Add" button if not present
+  if (!document.getElementById('admin-add-lesson-btn')) {
+    const fab = document.createElement('button');
+    fab.id = 'admin-add-lesson-btn';
+    fab.title = 'Add Lesson';
+    fab.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:22px;height:22px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+    fab.style.cssText = `position:fixed;bottom:2rem;right:2rem;z-index:900;background:var(--accent);color:#fff;border:none;border-radius:50%;width:52px;height:52px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.35)`;
+    fab.onclick = () => adminOpenLessonModal();
+    document.body.appendChild(fab);
+  }
+};
+
+// ── Admin modal helpers ──────────────────────────────────────────────────────
+function _ensureAdminLessonModal() {
+  if (document.getElementById('admin-lesson-modal')) return;
+  const m = document.createElement('div');
+  m.id = 'admin-lesson-modal';
+  m.style.cssText = 'display:none;position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.6);align-items:center;justify-content:center;';
+  m.innerHTML = `
+    <div style="background:var(--bg-card,#1a1a2e);border:1px solid var(--border);border-radius:12px;padding:1.75rem;max-width:540px;width:94%;max-height:88vh;overflow-y:auto;">
+      <h3 id="alm-title" style="margin:0 0 1.2rem;font-size:1rem;font-family:'Syne',sans-serif;">New Lesson</h3>
+      <input type="hidden" id="alm-edit-id">
+      <label style="font-size:.75rem;color:var(--muted);">Lesson Key *</label>
+      <input id="alm-key" style="width:100%;box-sizing:border-box;margin:.3rem 0 .8rem;padding:.55rem .75rem;background:var(--bg,#0f0f1a);border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:'DM Mono',monospace;font-size:.82rem;">
+      <label style="font-size:.75rem;color:var(--muted);">Title *</label>
+      <input id="alm-title" style="width:100%;box-sizing:border-box;margin:.3rem 0 .8rem;padding:.55rem .75rem;background:var(--bg,#0f0f1a);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:.82rem;">
+      <label style="font-size:.75rem;color:var(--muted);">Content * (HTML supported)</label>
+      <textarea id="alm-content" rows="6" style="width:100%;box-sizing:border-box;margin:.3rem 0 .8rem;padding:.55rem .75rem;background:var(--bg,#0f0f1a);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:.82rem;resize:vertical;"></textarea>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.8rem;">
+        <div>
+          <label style="font-size:.75rem;color:var(--muted);">Topic *</label>
+          <select id="alm-topic" style="width:100%;margin-top:.3rem;padding:.5rem .6rem;background:var(--bg,#0f0f1a);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:.8rem;">
+            <option value="claim_detection">Claim Detection</option>
+            <option value="source_verification">Source Verification</option>
+            <option value="bias_detection">Bias Detection</option>
+            <option value="evidence_evaluation">Evidence Evaluation</option>
+            <option value="general">General MIL</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:.75rem;color:var(--muted);">Difficulty</label>
+          <select id="alm-difficulty" style="width:100%;margin-top:.3rem;padding:.5rem .6rem;background:var(--bg,#0f0f1a);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:.8rem;">
+            <option value="beginner">Beginner</option>
+            <option value="intermediate">Intermediate</option>
+            <option value="advanced">Advanced</option>
+          </select>
+        </div>
+      </div>
+      <label style="font-size:.75rem;color:var(--muted);">MIL Skill (optional)</label>
+      <input id="alm-milskill" style="width:100%;box-sizing:border-box;margin:.3rem 0 .8rem;padding:.55rem .75rem;background:var(--bg,#0f0f1a);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:.82rem;">
+      <label style="font-size:.75rem;color:var(--muted);">Sort Order</label>
+      <input id="alm-sort" type="number" style="width:100%;box-sizing:border-box;margin:.3rem 0 .8rem;padding:.55rem .75rem;background:var(--bg,#0f0f1a);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:.82rem;">
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.8rem;margin-bottom:1rem;cursor:pointer;">
+        <input type="checkbox" id="alm-published" checked> Published (visible to users)
+      </label>
+      <div id="alm-error" style="color:var(--red,#ef4444);font-size:.78rem;margin-bottom:.6rem;min-height:1rem;"></div>
+      <div style="display:flex;gap:.6rem;justify-content:flex-end;">
+        <button onclick="adminCloseLessonModal()" style="background:none;border:1px solid var(--border);border-radius:7px;padding:.5rem 1rem;color:var(--muted);cursor:pointer;font-size:.82rem;">Cancel</button>
+        <button onclick="adminSaveLesson()" style="background:var(--accent);border:none;border-radius:7px;padding:.5rem 1.2rem;color:#fff;cursor:pointer;font-size:.82rem;font-weight:600;">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(m);
+}
+
+function adminOpenLessonModal(data = null) {
+  _ensureAdminLessonModal();
+  const m = document.getElementById('admin-lesson-modal');
+  document.getElementById('alm-edit-id').value   = '';
+  document.getElementById('alm-title').textContent = data ? 'Edit Lesson' : 'New Lesson';
+  document.getElementById('alm-title-el') && (document.getElementById('alm-title-el').textContent = data ? 'Edit Lesson' : 'New Lesson');
+  document.getElementById('alm-title').value  = '';
+  ['alm-key','alm-title','alm-content','alm-milskill','alm-sort'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  document.getElementById('alm-topic').value      = 'claim_detection';
+  document.getElementById('alm-difficulty').value = 'beginner';
+  document.getElementById('alm-published').checked = true;
+  document.getElementById('alm-error').textContent = '';
+  document.getElementById('alm-title-text') && (document.getElementById('alm-title-text').textContent = data ? 'Edit Lesson' : 'New Lesson');
+
+  if (data) {
+    document.getElementById('alm-edit-id').value    = data.id;
+    document.getElementById('alm-key').value        = data.lesson_key || '';
+    document.getElementById('alm-key').disabled     = true;
+    document.getElementById('alm-title').value      = data.title || '';
+    document.getElementById('alm-content').value    = data.content || '';
+    document.getElementById('alm-topic').value      = data.topic || 'general';
+    document.getElementById('alm-difficulty').value = data.difficulty || 'beginner';
+    document.getElementById('alm-milskill').value   = data.mil_skill || '';
+    document.getElementById('alm-sort').value       = data.sort_order ?? '';
+    document.getElementById('alm-published').checked = data.is_published !== 0 && data.is_published !== false;
+    document.getElementById('alm-title').setAttribute('data-heading', 'Edit Lesson');
+  } else {
+    document.getElementById('alm-key').disabled = false;
+    document.getElementById('alm-title').setAttribute('data-heading', 'New Lesson');
+  }
+  // Update heading
+  const h = m.querySelector('#alm-title-node') || m.querySelector('h3');
+  if (h) h.textContent = data ? 'Edit Lesson' : 'New Lesson';
+
+  m.style.display = 'flex';
+}
+
+function adminEditLesson(id) {
+  const l = LESSONS.find(x => x.id === id);
+  if (l) adminOpenLessonModal(l);
+}
+
+function adminCloseLessonModal() {
+  const m = document.getElementById('admin-lesson-modal');
+  if (m) m.style.display = 'none';
+}
+
+async function adminSaveLesson() {
+  const errEl  = document.getElementById('alm-error');
+  errEl.textContent = '';
+  const editId = document.getElementById('alm-edit-id').value;
+  const body   = {
+    lesson_key:  document.getElementById('alm-key').value.trim(),
+    title:       document.getElementById('alm-title').value.trim(),
+    content:     document.getElementById('alm-content').value.trim(),
+    topic:       document.getElementById('alm-topic').value,
+    difficulty:  document.getElementById('alm-difficulty').value,
+    mil_skill:   document.getElementById('alm-milskill').value.trim() || null,
+    sort_order:  parseInt(document.getElementById('alm-sort').value) || null,
+    is_published: document.getElementById('alm-published').checked,
+  };
+  if (!body.title || !body.content)           { errEl.textContent = 'Title and content are required.'; return; }
+  if (!editId && !body.lesson_key)             { errEl.textContent = 'Lesson key is required.'; return; }
+
+  const url    = editId ? `${API_BASE}/lessons/${editId}` : `${API_BASE}/lessons`;
+  const method = editId ? 'PUT' : 'POST';
+  try {
+    const res = await fetch(url, {
+      method, credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ..._getAuthHeader() },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      errEl.textContent = err.detail || `Error ${res.status}`;
+      return;
+    }
+    adminCloseLessonModal();
+    await loadLessons();
+    _adminToast(editId ? 'Lesson updated.' : 'Lesson created.');
+  } catch(e) {
+    errEl.textContent = e.message || 'Network error.';
+  }
+}
+
+async function adminToggleLesson(id) {
+  try {
+    const res = await fetch(`${API_BASE}/lessons/${id}/toggle-published`, {
+      method: 'PATCH', credentials: 'include',
+      headers: { ..._getAuthHeader() },
+    });
+    if (!res.ok) throw new Error(`Error ${res.status}`);
+    await loadLessons();
+    _adminToast('Lesson status updated.');
+  } catch(e) {
+    _adminToast(e.message || 'Could not toggle lesson.', 'error');
+  }
+}
+
+async function adminDeleteLesson(id, title) {
+  if (!confirm(`Delete "${title}"? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/lessons/${id}`, {
+      method: 'DELETE', credentials: 'include',
+      headers: { ..._getAuthHeader() },
+    });
+    if (!res.ok && res.status !== 204) throw new Error(`Error ${res.status}`);
+    await loadLessons();
+    _adminToast('Lesson deleted.');
+  } catch(e) {
+    _adminToast(e.message || 'Could not delete lesson.', 'error');
+  }
+}
+
+function _adminToast(msg, type = 'ok') {
+  const t = document.createElement('div');
+  t.style.cssText = `position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%);z-index:9999;
+    background:${type==='error'?'var(--red,#ef4444)':'var(--green,#22c55e)'};color:#fff;
+    padding:.55rem 1.25rem;border-radius:8px;font-size:.82rem;font-weight:600;pointer-events:none;
+    box-shadow:0 4px 16px rgba(0,0,0,.35)`;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2800);
+}
+
+// Close admin modal on outside click
+document.addEventListener('click', e => {
+  const m = document.getElementById('admin-lesson-modal');
+  if (m && e.target === m) adminCloseLessonModal();
+});
+
+// ══ LESSONS STATS SIDEBAR PANEL ═══════════════════════════════════════════════
+// Shows per-topic quiz accuracy for logged-in users (same data as quiz panel,
+// surfaced directly in the Lessons page sidebar/panel).
+
+async function loadLessonsStatsPanel() {
+  const wrapper   = document.getElementById('lessons-stats-panel-wrapper');
+  const container = document.getElementById('lessons-stats-panel');
+  if (!container) return;
+
+  const userId = parseInt(localStorage.getItem('sp_user_id'));
+  if (!userId) {
+    // Not logged in — hide the whole panel entirely
+    if (wrapper) wrapper.style.display = 'none';
     return;
   }
 
-  const options = Array.isArray(q.options) ? q.options : JSON.parse(q.options || '[]');
-  pbRenderExerciseUI(tech, q.question_text, options, q.correct_index, q.explanation || '', q.image_url || null, null);
-}
+  // Show the panel now that we know the user is logged in
+  if (wrapper) wrapper.style.display = '';
 
-function pbRenderExerciseUI(tech, questionText, options, correctIdx, explanation, imageUrl, scenarioText) {
-  const area = document.getElementById('pb-module-area');
-  const letters = ['A', 'B', 'C', 'D', 'E', 'F'];
-  area.innerHTML = `
-    <div class="module-card">
-      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem;">
-        <button onclick="pbGoBack()" style="background:transparent;border:1px solid var(--border);border-radius:7px;padding:.3rem .65rem;color:var(--muted);cursor:pointer;font-size:.78rem;">← Back</button>
-        <span class="phase-badge phase-exercise">Phase 2 — Quiz</span>
-      </div>
-      <div class="module-title">Test your knowledge</div>
-      ${imageUrl ? `<img src="${imageUrl}" alt="scenario image" style="width:100%;max-height:220px;object-fit:cover;border-radius:12px;margin-bottom:1rem;border:1px solid var(--border);">` : ''}
-      ${scenarioText ? `<div class="example-box" style="margin-bottom:1rem;"><div class="example-text">${scenarioText}</div></div>` : ''}
-      <div class="module-desc" style="margin-bottom:1rem;">${questionText}</div>
-      <div class="options-grid" id="pb-options-grid">
-        ${options.map((opt, i) => `
-          <button class="option-btn" id="pb-opt-${i}" onclick="pbSelectOptionIdx(${i})">
-            <div class="option-letter">${letters[i]}</div>
-            <div class="option-name">${opt}</div>
-          </button>`).join('')}
-      </div>
-      <div class="btn-row">
-        <button class="btn btn-primary" id="pb-submit-btn"
-          onclick="pbSubmitAnswerIdx('${tech.id}', ${correctIdx}, ${JSON.stringify(explanation)})"
-          disabled style="opacity:.4;cursor:not-allowed;">Submit Answer</button>
-      </div>
-    </div>`;
-  window._pbSelectedIdx = null;
-}
-
-function pbSelectOptionIdx(idx) {
-  window._pbSelectedIdx = idx;
-  document.querySelectorAll('.option-btn').forEach((b, i) => {
-    b.classList.toggle('selected', i === idx);
-  });
-  const btn = document.getElementById('pb-submit-btn');
-  if (btn) { btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer'; }
-}
-
-function pbSubmitAnswerIdx(techId, correctIdx, explanation) {
-  const selected = window._pbSelectedIdx;
-  if (selected === null || selected === undefined) return;
-  const tech = TECHNIQUES.find(t => t.id === techId);
-  const correct = selected === correctIdx;
-  pbSaveProgress(techId, { phase: 'done', correct, tried: true });
-  pbRenderProgress();
-  pbRenderResultWithRetry(tech, correct, explanation);
-}
-
-// ── Result phase with "Try another scenario" ──────────────────────────────────
-function pbRenderResultWithRetry(tech, correct, explanation) {
-  const area = document.getElementById('pb-module-area');
-  const nextId = pbGetNextTech(tech.id);
-  const hasMore = (pbQuestionCounts[tech.id] || 0) > 1;
-  area.innerHTML = `
-    <div class="module-card">
-      <span class="phase-badge ${correct ? 'phase-result-correct' : 'phase-result-wrong'}">${correct ? '✓ Correct' : '✗ Incorrect'}</span>
-      <div class="result-score">
-        <div class="result-icon">${correct ? '🎯' : '🤔'}</div>
-        <div class="result-msg">${correct ? 'You spotted it!' : 'Not quite'}</div>
-        <div class="result-sub">${correct ? 'Your resistance is building.' : 'Understanding the technique is the first step to resisting it.'}</div>
-      </div>
-      <div class="explanation-block">
-        <div class="why-label" style="color:var(--accent2);margin-bottom:.5rem;">What was actually happening</div>
-        <div class="explanation-text">${explanation || tech.explanation_result || ''}</div>
-      </div>
-      <div class="btn-row">
-        ${nextId ? `<button class="btn btn-primary" onclick="pbStartTech('${nextId}')">Next technique →</button>` : '<button class="btn btn-success" style="background:rgba(52,211,153,.15);color:var(--green);border:1px solid rgba(52,211,153,.3);padding:.65rem 1.2rem;border-radius:10px;font-family:\'Syne\',sans-serif;font-weight:600;font-size:.85rem;">🎉 All techniques done!</button>'}
-        <button class="btn" style="background:transparent;border:1px solid var(--border);color:var(--muted);padding:.65rem 1.2rem;border-radius:10px;cursor:pointer;font-family:'Syne',sans-serif;font-weight:600;font-size:.85rem;" onclick="pbGoBack()">← Choose another</button>
-        <button class="btn" style="background:rgba(79,142,247,.1);border:1px solid rgba(79,142,247,.25);color:var(--accent);padding:.65rem 1.2rem;border-radius:10px;cursor:pointer;font-family:'Syne',sans-serif;font-weight:600;font-size:.85rem;" onclick="pbTryAnother('${tech.id}')">🔄 Try another scenario</button>
-      </div>
-    </div>`;
-}
-
-// Reset to exercise phase so a new random question is fetched
-function pbTryAnother(techId) {
-  const p = pbGetProgress(techId);
-  pbProgress[techId] = { phase: 'exercise', correct: null, tried: p.tried || true };
-  sessionStorage.setItem(PB_STORAGE_KEY, JSON.stringify(pbProgress));
-  pbSelectedOption = null;
-  window._pbSelectedIdx = null;
-  pbRenderTechList();
-}
-
-// Legacy result renderer (used for re-study flow from pbStartTech)
-function pbRenderResult(tech, correct) {
-  pbRenderResultWithRetry(tech, correct, tech.explanation_result);
-}
-
-function pbGetNextTech(currentId) {
-  const idx = TECHNIQUES.findIndex(t => t.id === currentId);
-  const remaining = TECHNIQUES.slice(idx+1).filter(t => !pbGetProgress(t.id).tried);
-  return remaining[0]?.id || TECHNIQUES.find(t => !pbGetProgress(t.id).tried && t.id !== currentId)?.id || null;
-}
-
-function pbGoBack() {
-  pbActiveTech = null;
-  pbRenderProgress();
-  pbRenderTechList();
-}
-
-// ── Init ──────────────────────────────────────────────────────────────────────
-async function initPrebunking() {
+  container.innerHTML = '<div style="color:var(--muted);font-size:.78rem;text-align:center;">Loading…</div>';
   try {
-    let tok = sessionStorage.getItem('sp_session');
-    if (!tok) {
-      try { const r = await fetch('/auth/session'); const d = await r.json(); tok = d.session_token; }
-      catch { tok = Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b=>b.toString(16).padStart(2,'0')).join(''); }
-      sessionStorage.setItem('sp_session', tok);
+    const [statsRes, progressRes] = await Promise.all([
+      fetch(`${API_BASE}/quiz/stats/${userId}`, { credentials: 'include', headers: _getAuthHeader() }),
+      fetch(`${API_BASE}/lessons/completions`, { credentials: 'include', headers: _getAuthHeader() }),
+    ]);
+
+    const statsRows   = statsRes.ok   ? await statsRes.json()    : [];
+    const completions = progressRes.ok ? await progressRes.json() : [];
+    const totalCompleted = completions.length;
+
+    if (!statsRows.length && !totalCompleted) {
+      container.innerHTML = `<p style="color:var(--muted);font-size:.8rem;text-align:center;">
+        Complete some lessons and quizzes to see your stats here.</p>`;
+      return;
     }
-    const uid = localStorage.getItem('sp_user_id') ? `&user_id=${localStorage.getItem('sp_user_id')}` : '';
-    // Load server progress
-    const r = await fetch(`${API_BASE}/prebunking/modules?session_token=${tok}${uid}`);
-    if (r.ok) {
-      const data = await r.json();
-      (data.completions || []).forEach(c => {
-        pbProgress[c.technique_id] = {phase:'done', correct: c.correct, tried: true};
-      });
-      sessionStorage.setItem(PB_STORAGE_KEY, JSON.stringify(pbProgress));
-    }
-    // Load question counts for "Try another" availability
-    const cr = await fetch(`${API_BASE}/prebunking/questions/count`);
-    if (cr.ok) {
-      const cd = await cr.json();
-      pbQuestionCounts = cd.by_technique || {};
-    }
-  } catch { /* offline — use local progress */ }
-  pbRenderProgress();
-  pbRenderTechList();
-}
-// ══ END PREBUNKING JS ══════════════════════════════════════════════════════════
 
-initPrebunking();
+    // Build topic order dynamically from whatever topics came back from the API,
+    // plus anything already in LESSONS so we never miss a category.
+    const seenTopics = new Set([
+      ...statsRows.map(r => r.topic),
+      ...LESSONS.map(l => l.topic),
+    ].filter(Boolean));
+    const topicOrder = [...seenTopics];
 
-// ══ PREBUNKING QUIZ JS ════════════════════════════════════════════════════════
-// Separate quiz that tests technique recognition — distinct from the MIL quiz.
+    const statsByTopic = {};
+    statsRows.forEach(r => { statsByTopic[r.topic] = r; });
 
-const PBQ_COUNT = 10; // questions per round
+    const html = topicOrder.map(topic => {
+      const r = statsByTopic[topic];
+      if (!r) return '';
+      const pct = r.accuracy_pct ?? 0;
+      const c = pct >= 80 ? 'var(--green,#22c55e)' : pct >= 50 ? 'var(--yellow,#fbbf24)' : 'var(--red,#ef4444)';
+      const label = (TOPIC_META[topic] || {}).label ||
+                    topic.replace(/_/g,' ').replace(/\b\w/g, l => l.toUpperCase());
+      return `<div style="margin-bottom:.65rem;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.2rem;">
+          <span style="font-size:.75rem;color:var(--text);">${label}</span>
+          <span style="font-family:'DM Mono',monospace;font-size:.72rem;color:${c};font-weight:600;">${pct}%</span>
+        </div>
+        <div style="height:5px;border-radius:3px;background:var(--border);overflow:hidden;">
+          <div style="height:100%;width:${pct}%;background:${c};border-radius:3px;transition:width .4s;"></div>
+        </div>
+        <div style="font-size:.68rem;color:var(--muted);margin-top:.15rem;">${r.topic_correct}/${r.topic_attempts} correct</div>
+      </div>`;
+    }).filter(Boolean).join('');
 
-// Fallback questions used when API returns nothing
-const FALLBACK_PBQ_QUESTIONS = [
-  { id:'fb1', question_text:'A viral post says: "SCIENTISTS FINALLY ADMIT: Vaccines cause autism!! Government trying to DELETE this study — share before it\'s gone!!" What manipulation technique is this?', option_a:'Emotional Override — uses fear and outrage to bypass critical thinking', option_b:'False Equivalence — treats two unequal claims as equal', option_c:'Cherry Picking — selects only data that supports the claim', option_d:'Impersonation — pretends to be a credible authority', correct_answer:'A', explanation:'The ALL CAPS, urgency to share, and "they\'re hiding it from you" framing are classic Emotional Override signals designed to make you react before you think.' },
-  { id:'fb2', question_text:'An article claims: "Studies show coffee cures cancer — therefore drinking 10 cups a day is completely safe." What technique is being used?', option_a:'Emotional Override', option_b:'False Equivalence — stretching a limited finding to an unsupported conclusion', option_c:'Scarcity / Fear of Missing Out', option_d:'Slippery Slope — exaggerating a chain of consequences', correct_answer:'B', explanation:'Correlation in one study does not mean unlimited consumption is safe. This stretches a limited finding far beyond what the evidence supports.' },
-  { id:'fb3', question_text:'A meme shows a politician alongside a quote they never said, presented as if it were real. This is an example of:', option_a:'Cherry Picking', option_b:'Astroturfing — creating fake grassroots support', option_c:'Impersonation / Fabricated Quotes — putting false words in a real person\'s mouth', option_d:'Emotional Override', correct_answer:'C', explanation:'Fabricated quotes attributed to real figures are a common disinformation tactic because they borrow credibility from a known person.' },
-  { id:'fb4', question_text:'"Everyone is switching to this new diet — don\'t be the last person to find out!" This message primarily uses:', option_a:'Bandwagon / Social Proof — pressuring you to follow the crowd', option_b:'Cherry Picking', option_c:'False Equivalence', option_d:'Scapegoating', correct_answer:'A', explanation:'Claiming "everyone" does something exploits our instinct to conform socially, overriding individual evaluation of evidence.' },
-  { id:'fb5', question_text:'A news site only publishes the statistics that support its preferred conclusion and ignores contradictory data. This technique is called:', option_a:'Emotional Override', option_b:'Impersonation', option_c:'Cherry Picking — selectively using data to mislead', option_d:'False Equivalence', correct_answer:'C', explanation:'Cherry picking makes a distorted picture seem credible by using real (but selectively chosen) data, omitting anything that challenges the conclusion.' },
-  { id:'fb6', question_text:'"If we allow same-sex marriage, next people will want to marry animals." This argument is an example of:', option_a:'Slippery Slope — assuming one event inevitably leads to extreme outcomes', option_b:'Emotional Override', option_c:'Cherry Picking', option_d:'Bandwagon', correct_answer:'A', explanation:'Slippery slope fallacies predict a chain of extreme consequences from a single policy change, without evidence that those steps would actually follow.' },
-  { id:'fb7', question_text:'A website that looks almost identical to a real news outlet publishes a false story. What technique is this?', option_a:'Cherry Picking', option_b:'Impersonation — mimicking legitimate sources to borrow credibility', option_c:'Emotional Override', option_d:'Scarcity appeal', correct_answer:'B', explanation:'Fake sites that clone the look of real outlets exploit the trust readers already have in the original, making the false content seem verified.' },
-  { id:'fb8', question_text:'"This limited-time offer expires in 10 minutes — act now or miss out forever!" This persuasion technique relies on:', option_a:'Scarcity / Urgency — manufacturing time pressure to prevent careful thinking', option_b:'False Equivalence', option_c:'Slippery Slope', option_d:'Cherry Picking', correct_answer:'A', explanation:'Artificial urgency short-circuits deliberation. When you feel you\'ll miss out, you\'re less likely to pause and fact-check.' },
-  { id:'fb9', question_text:'A politician blames all of a country\'s economic problems on a single minority group. This is an example of:', option_a:'Emotional Override', option_b:'Scapegoating — redirecting blame onto a convenient out-group', option_c:'Cherry Picking', option_d:'Bandwagon', correct_answer:'B', explanation:'Scapegoating simplifies complex problems by assigning blame to a single group, often stirring up prejudice and diverting attention from real causes.' },
-  { id:'fb10', question_text:'A post says: "Mainstream media and Big Tech are conspiring to hide the truth about [topic]." Without specific evidence, this framing is an example of:', option_a:'Bandwagon', option_b:'False Equivalence', option_c:'Conspiracy Framing — using vague accusations of hidden agendas to dismiss evidence', option_d:'Cherry Picking', correct_answer:'C', explanation:'Conspiracy framing inoculates the claim against fact-checking: any debunking can be reframed as part of the cover-up, making the claim unfalsifiable.' },
-];
-
-async function initPbQuiz() {
-  try {
-    const r = await fetch(`${API_BASE}/prebunking/questions`);
-    if (!r.ok) throw new Error();
-    const data = await r.json();
-    _pbqQuestions = Array.isArray(data) ? data : (data.questions || []);
+    container.innerHTML = `
+      <div style="font-size:.7rem;color:var(--muted);margin-bottom:.75rem;display:flex;justify-content:space-between;">
+        <span>📚 ${totalCompleted} lesson${totalCompleted !== 1 ? 's' : ''} completed</span>
+        <a href="#" onclick="loadLessonsStatsPanel();return false" style="color:var(--accent);text-decoration:none;font-size:.68rem;">↺ Refresh</a>
+      </div>
+      ${html || '<p style="color:var(--muted);font-size:.78rem;">No quiz attempts yet.</p>'}
+    `;
   } catch {
-    _pbqQuestions = [];
-  }
-  // If API returned nothing, use our hardcoded fallback questions
-  if (_pbqQuestions.length === 0) {
-    _pbqQuestions = FALLBACK_PBQ_QUESTIONS;
-  }
-  const startBtn = document.getElementById('pbq-start-btn');
-  const noQEl    = document.getElementById('pbq-no-questions');
-  // Only disable if still truly empty (shouldn't happen now)
-  if (_pbqQuestions.length === 0) {
-    if (startBtn)  startBtn.disabled = true;
-    if (noQEl)     noQEl.style.display = 'block';
-  } else {
-    if (startBtn)  startBtn.disabled = false;
-    if (noQEl)     noQEl.style.display = 'none';
+    container.innerHTML = '<p style="color:var(--muted);font-size:.8rem;text-align:center;">Could not load stats.</p>';
   }
 }
 
-function _pbqShuffle(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
+// Auto-load stats panel on page load
+document.addEventListener('DOMContentLoaded', loadLessonsStatsPanel);
+// Also call right away in case DOMContentLoaded already fired
+if (document.readyState !== 'loading') loadLessonsStatsPanel();
 
-function startPbQuiz() {
-  if (_pbqQuestions.length === 0) { initPbQuiz().then(startPbQuiz); return; }
-  _pbqActive   = _pbqShuffle(_pbqQuestions).slice(0, PBQ_COUNT);
-  _pbqIdx      = 0;
-  _pbqScore    = 0;
-  _pbqMissed   = [];
-  _pbqAnswered = false;
-
-  document.getElementById('pbq-start').style.display   = 'none';
-  document.getElementById('pbq-results').style.display = 'none';
-  document.getElementById('pbq-running').style.display = '';
-  _pbqRender();
-}
-
-function _pbqRender() {
-  const q       = _pbqActive[_pbqIdx];
-  const total   = _pbqActive.length;
-  _pbqAnswered  = false;
-
-  document.getElementById('pbq-counter').textContent    = `Question ${_pbqIdx + 1} / ${total}`;
-  document.getElementById('pbq-score-live').textContent = `Score: ${_pbqScore}`;
-  document.getElementById('pbq-prog-bar').style.width   = `${(_pbqIdx / total) * 100}%`;
-  document.getElementById('pbq-question').textContent   = q.question_text;
-  document.getElementById('pbq-feedback').style.display = 'none';
-  document.getElementById('pbq-next-btn').style.display = 'none';
-
-  // Media
-  const mediaEl = document.getElementById('pbq-media');
-  mediaEl.style.display = 'none';
-  mediaEl.innerHTML = '';
-  const mt = q.media_type || (q.image_url ? 'image' : q.video_url ? 'video' : 'text');
-  if (mt === 'image' && q.image_url) {
-    mediaEl.style.display = '';
-    mediaEl.innerHTML = `<img src="${q.image_url}" alt="scenario" style="max-width:100%;max-height:220px;border-radius:10px;border:1px solid var(--border);object-fit:cover;">`;
-  } else if (mt === 'video' && q.video_url) {
-    mediaEl.style.display = '';
-    // YouTube embed or direct video
-    const isYT = /youtu\.?be/.test(q.video_url);
-    if (isYT) {
-      const vid = q.video_url.match(/(?:v=|youtu\.be\/)([^&?]+)/)?.[1] || '';
-      mediaEl.innerHTML = `<iframe width="100%" height="200" src="https://www.youtube.com/embed/${vid}" frameborder="0" allowfullscreen style="border-radius:10px;"></iframe>`;
-    } else {
-      mediaEl.innerHTML = `<video src="${q.video_url}" controls style="max-width:100%;max-height:220px;border-radius:10px;border:1px solid var(--border);"></video>`;
-    }
-  } else if (mt === 'file' && q.image_url) {
-    mediaEl.style.display = '';
-    mediaEl.innerHTML = `<a href="${q.image_url}" target="_blank" style="color:var(--accent);font-size:.85rem;">📎 View attached file</a>`;
-  }
-
-  // Options — A/B/C/D
-  const opts = [
-    { letter: 'A', text: q.option_a },
-    { letter: 'B', text: q.option_b },
-    { letter: 'C', text: q.option_c },
-    { letter: 'D', text: q.option_d },
-  ];
-  const optsEl = document.getElementById('pbq-options');
-  optsEl.innerHTML = '';
-  opts.forEach(({ letter, text }) => {
-    const btn = document.createElement('button');
-    btn.className = 'pbq-opt';
-    btn.textContent = `${letter}. ${text}`;
-    btn.dataset.letter = letter;
-    btn.onclick = () => _pbqAnswer(letter);
-    optsEl.appendChild(btn);
-  });
-}
-
-function _pbqAnswer(chosen) {
-  if (_pbqAnswered) return;
-  _pbqAnswered = true;
-  const q       = _pbqActive[_pbqIdx];
-  const correct = (q.correct_answer || '').toUpperCase();
-  const isRight = chosen === correct;
-
-  if (isRight) _pbqScore++;
-  else         _pbqMissed.push({ q, chosen });
-
-  // Colour the buttons
-  document.querySelectorAll('.pbq-opt').forEach(btn => {
-    btn.disabled = true;
-    if (btn.dataset.letter === correct)  btn.classList.add('correct');
-    if (btn.dataset.letter === chosen && !isRight) btn.classList.add('wrong');
-  });
-
-  // Feedback
-  const fbEl = document.getElementById('pbq-feedback');
-  fbEl.style.display = '';
-  fbEl.className = `quiz-feedback ${isRight ? 'correct' : 'wrong'}`;
-  fbEl.innerHTML = isRight
-    ? `✅ <strong>Correct!</strong>${q.explanation ? ' ' + q.explanation : ''}`
-    : `❌ <strong>Incorrect.</strong> The answer is <strong>${correct}</strong>.${q.explanation ? ' ' + q.explanation : ''}`;
-
-  document.getElementById('pbq-next-btn').style.display = '';
-  // Auto-submit attempt
-  _pbqSubmitAttempt(q, chosen, isRight);
-}
-
-async function _pbqSubmitAttempt(q, chosen, correct) {
-  try {
-    const tok = sessionStorage.getItem('sp_session') || '';
-    const uid = localStorage.getItem('sp_user_id') ? `&user_id=${localStorage.getItem('sp_user_id')}` : '';
-    await fetch(`${API_BASE}/prebunking/attempt`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question_id:  q.id,
-        technique_id: q.technique_id,
-        chosen_answer: chosen,
-        correct,
-        session_token: tok,
-      }),
-    });
-  } catch { /* non-blocking */ }
-}
-
-function pbqNext() {
-  _pbqIdx++;
-  if (_pbqIdx >= _pbqActive.length) {
-    _pbqShowResults();
-  } else {
-    _pbqRender();
-  }
-}
-
-function _pbqShowResults() {
-  document.getElementById('pbq-running').style.display  = 'none';
-  document.getElementById('pbq-results').style.display  = '';
-
-  const total   = _pbqActive.length;
-  const pct     = Math.round((_pbqScore / total) * 100);
-  const emoji   = pct >= 80 ? '🛡️' : pct >= 50 ? '🧪' : '🎯';
-  const msg     = pct >= 80 ? 'Excellent — you\'re well-inoculated against these techniques!'
-                : pct >= 50 ? 'Good effort! Review the techniques you missed and try again.'
-                :             'Keep practicing — spotting these techniques takes time!';
-
-  document.getElementById('pbq-result-emoji').textContent  = emoji;
-  document.getElementById('pbq-result-title').textContent  = 'Quiz Complete!';
-  document.getElementById('pbq-result-score').textContent  = `${_pbqScore} / ${total}`;
-  document.getElementById('pbq-result-msg').textContent    = msg;
-
-  // Missed list
-  const missedEl = document.getElementById('pbq-missed-list');
-  missedEl.innerHTML = '';
-  if (_pbqMissed.length > 0) {
-    const heading = document.createElement('p');
-    heading.style.cssText = 'font-weight:600;font-size:.85rem;margin-bottom:.6rem;';
-    heading.textContent = 'Review — questions you missed:';
-    missedEl.appendChild(heading);
-    _pbqMissed.forEach(({ q, chosen }) => {
-      const div = document.createElement('div');
-      div.className = 'pbq-missed-item';
-      const opts = { A: q.option_a, B: q.option_b, C: q.option_c, D: q.option_d };
-      div.innerHTML =
-        `<div style="margin-bottom:.35rem;font-size:.85rem;">${q.question_text}</div>` +
-        `<div style="color:#ef4444;font-size:.8rem;">You chose: <strong>${chosen}. ${opts[chosen] || ''}</strong></div>` +
-        `<div style="color:#22c55e;font-size:.8rem;">Correct: <strong>${q.correct_answer}. ${opts[q.correct_answer] || ''}</strong></div>` +
-        (q.explanation ? `<div style="color:var(--muted);font-size:.78rem;margin-top:.3rem;">${q.explanation}</div>` : '');
-      missedEl.appendChild(div);
-    });
-  }
-}
-
-initPbQuiz(); // pre-load questions on page open
-// ══ END PREBUNKING QUIZ JS ════════════════════════════════════════════════════

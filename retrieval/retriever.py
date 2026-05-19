@@ -1,21 +1,6 @@
 """
 retrieval/retriever.py
 Evidence retrieval using BGE-M3 hybrid search (dense + sparse).
-
-v3.5 Changes:
-  DOMAIN_DIVERSE — Replaces flat MAX_PER_DOMAIN cap with domain-diversified
-          retrieval. (see original notes)
-
-v3.6 Changes:
-  PER_DOMAIN_PER_PIPELINE — Fixes the remaining volume-bias problem in v3.5.
-          (see original notes)
-
-v4.0 Changes — MIL (Media and Information Literacy) mode:
-  - RELEVANCE_THRESHOLD: 0.30 → 0.20
-      MIL optimises for recall over precision — a loosely related article on
-      media framing or source credibility is still valuable context for a
-      learner. 0.20 still filters noise while casting a wider net.
-
   - DOMAIN_DIVERSE_K: 5 → 6 for news/stats/mil pipelines.
       Gives MMR (added below) more candidates per domain to diversify from.
 
@@ -79,10 +64,19 @@ SPARSE_WEIGHT       = 0.3
 
 # ── MMR config ────────────────────────────────────────────────────────────────
 # Lambda: 1.0 = pure relevance, 0.0 = pure diversity.
-# 0.7 = 70% relevance, 30% diversity — MIL default.
-# Learners still get the most relevant articles first, but won't see three
-# near-identical news reports when one would do.
-MMR_LAMBDA = 0.7
+#
+# MMR_LAMBDA_CLAIM = 0.7 — used when searching against the user's typed claim
+#   (Step 1). 70% relevance, 30% diversity. Keeps results tightly on-topic
+#   since the claim is a precise, user-authored query.
+#
+# MMR_LAMBDA_SUBMISSION = 0.5 — used when searching against the raw submission
+#   content (corroboration / Section 1 cross-check). Equal weight between
+#   relevance and diversity. The submission text is longer and less focused, so
+#   a looser lambda casts a wider net across perspectives — good for surfacing
+#   corroborating or contrasting sources the learner can compare.
+MMR_LAMBDA_CLAIM      = 0.7   # claim search: relevance-first
+MMR_LAMBDA_SUBMISSION = 0.5   # submission search: broader, more diverse
+MMR_LAMBDA            = MMR_LAMBDA_CLAIM  # backward-compat default
 
 try:
     import faiss as _faiss
@@ -614,9 +608,20 @@ class Retriever:
         )
         return [candidates[i] for i in selected_indices]
 
-    def search(self, claim: str, k: int = 7) -> List[Dict]:
+    def search(self, claim: str, k: int = 7, mode: str = "claim") -> List[Dict]:
         """
         Find top-k relevant and diverse evidence sentences for a claim.
+
+        Args:
+            claim:  The query text (user claim or raw submission content).
+            k:      Number of final results to return.
+            mode:   "claim"      — tighter MMR (λ=0.7), relevance-first.
+                                   Used when the query is the user's Step 1 claim.
+                    "submission" — looser MMR (λ=0.5), more diversity.
+                                   Used when the query is the raw submission content
+                                   (corroboration / cross-checking section). Casts
+                                   a wider net across perspectives since the input
+                                   is longer and less focused than a single claim.
 
         v4.0 flow:
           1. Per-domain-per-pipeline retrieval (unchanged from v3.6).
@@ -712,10 +717,15 @@ class Retriever:
         # Re-encode reranked candidates and apply Maximal Marginal Relevance to
         # ensure the final top-k contains genuinely different content angles,
         # not near-duplicates of the same article rephrased.
+        #
+        # mode="submission" uses a looser lambda (0.5) so corroboration results
+        # draw from a broader spread of sources — the submission text is longer
+        # and less focused than a typed claim, so diversity matters more here.
+        mmr_lambda = MMR_LAMBDA_SUBMISSION if mode == "submission" else MMR_LAMBDA_CLAIM
         if len(reranked) > k:
             embed_matrix = self._get_candidate_embeddings(reranked)
             if embed_matrix is not None:
-                reranked = self._mmr(reranked, embed_matrix, top_k=k)
+                reranked = self._mmr(reranked, embed_matrix, top_k=k, lam=mmr_lambda)
             else:
                 reranked = reranked[:k]
         else:

@@ -6,73 +6,254 @@
 <title>SocialProof — Login</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/pages/styles.css">
+<style id="topnav-css">
+.topnav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 900;
+  height: 56px;
+  background: rgba(13,13,18,.92);
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.07));
+  display: flex;
+  align-items: center;
+  padding: 0 1.2rem;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.topnav-logo {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800;
+  font-size: 1.08rem;
+  color: var(--text, #e8e8ef);
+  text-decoration: none;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  margin-right: 1.6rem;
+  flex-shrink: 0;
+}
+.topnav-logo span { color: var(--accent, #4f8ef7); }
+.topnav-links {
+  display: flex;
+  align-items: center;
+  gap: .1rem;
+  flex: 1;
+  min-width: 0;
+  overflow: visible;
+}
+.topnav .nav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: .38rem;
+  font-family: 'DM Sans', sans-serif;
+  font-size: .82rem;
+  font-weight: 500;
+  color: var(--muted, #8b8b9a);
+  text-decoration: none;
+  padding: .36rem .7rem;
+  border-radius: 8px;
+  transition: background .15s, color .15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.topnav .nav-item svg { width: 14px; height: 14px; flex-shrink: 0; }
+.topnav .nav-item:hover  { background: rgba(255,255,255,.05); color: var(--text, #e8e8ef); }
+.topnav .nav-item.active { background: rgba(79,142,247,.12); color: var(--accent, #4f8ef7); }
+.topnav-age-group {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  margin-left: auto;
+  padding-left: .9rem;
+  flex-shrink: 0;
+}
+.topnav-age-label {
+  font-family: 'DM Mono', monospace;
+  font-size: .62rem;
+  color: var(--muted);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.topnav .age-pill {
+  font-family: 'DM Sans', sans-serif;
+  font-size: .7rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  border-radius: 6px;
+  padding: .18rem .48rem;
+  cursor: pointer;
+  transition: all .15s;
+  flex-shrink: 0;
+}
+.topnav .age-pill:hover,
+.topnav .age-pill.active { background: rgba(79,142,247,.12); color: var(--accent); border-color: rgba(79,142,247,.35); }
+.topnav-login { margin-left: .4rem; flex-shrink: 0; }
+.topnav-burger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  padding: .3rem;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.topnav-burger svg { width: 22px; height: 22px; display: block; }
+.topnav-burger:hover { color: var(--text); }
+/* Mobile drawer */
+.topnav-drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 260px;
+  background: var(--surface, #0f0f13);
+  border-left: 1px solid var(--border, rgba(255,255,255,.08));
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform .25s ease;
+}
+.topnav-drawer.open { transform: translateX(0); }
+.topnav-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+  z-index: 1050;
+  cursor: pointer;
+}
+.topnav-overlay.open { display: block; }
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1.1rem;
+  border-bottom: 1px solid var(--border);
+  height: 56px;
+  flex-shrink: 0;
+}
+.drawer-close-btn {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--muted); padding: .3rem; border-radius: 6px; display: flex;
+}
+.drawer-close-btn svg { width: 18px; height: 18px; display: block; }
+.drawer-close-btn:hover { color: var(--text); }
+.drawer-nav {
+  display: flex; flex-direction: column;
+  padding: .5rem; gap: .05rem; flex: 1; overflow-y: auto;
+}
+.drawer-nav .nav-item {
+  display: flex; align-items: center; gap: .5rem;
+  font-family: 'DM Sans', sans-serif; font-size: .88rem; font-weight: 500;
+  color: var(--muted); text-decoration: none;
+  padding: .55rem .75rem; border-radius: 9px;
+  transition: background .15s, color .15s;
+}
+.drawer-nav .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
+.drawer-nav .nav-item:hover  { background: rgba(255,255,255,.05); color: var(--text); }
+.drawer-nav .nav-item.active { background: rgba(79,142,247,.12); color: var(--accent); }
+.drawer-age { padding: .6rem .85rem .9rem; border-top: 1px solid var(--border); flex-shrink: 0; }
+/* Layout */
+body { padding-top: 56px !important; }
+.sidebar         { display: none !important; }
+.sidebar-overlay { display: none !important; }
+.burger-btn      { display: none !important; }
+.main            { margin-left: 0 !important; }
+@media (max-width: 768px) {
+  .topnav-links  { display: none; }
+  .topnav-burger { display: flex; }
+}
+</style>
 </head>
 <body class="page-login">
-<div class="grid-bg"></div>
-<div class="glow-blob"></div>
+<script id="topnav-js">
+(function(){
+  function _toggle(){
+    var drawer  = document.getElementById('topnav-drawer');
+    var overlay = document.getElementById('sidebar-overlay');
+    if(!drawer) return;
+    var open = drawer.classList.toggle('open');
+    if(overlay) overlay.classList.toggle('open', open);
+    document.body.style.overflow = open ? 'hidden' : '';
+  }
+  window.toggleSidebar = _toggle;
+  document.addEventListener('DOMContentLoaded', function(){ window.toggleSidebar = _toggle; });
+})();
+</script>
 
-<aside class="sidebar" id="sidebar">
-  <div class="sidebar-header">
-    <a href="index.html" class="sidebar-logo">Social<span>Proof</span></a>
-    <button class="sidebar-close-btn" onclick="toggleSidebar()" title="Close sidebar">
+<div class="grid-bg"></div>
+<!-- ── TOPNAV ── -->
+<nav class="topnav" id="topnav">
+  <a href="index.html" class="topnav-logo">Social<span>Proof</span></a>
+  <div class="topnav-links">
+    <a href="index.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>Practice
+    </a>
+    <a href="lessons.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>Lessons
+    </a>
+    <a href="mindmap.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>My Map
+    </a>
+    <a href="dashboard.html" class="nav-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>Dashboard
+    </a>
+    <div class="topnav-age-group">
+      <span class="topnav-age-label">Age</span>
+      <button class="age-pill" id="age-youth"  onclick="setAgeMode('youth')">Youth</button>
+      <button class="age-pill" id="age-adult" onclick="setAgeMode('adult')">Adult</button>
+      <button class="age-pill" id="age-older" onclick="setAgeMode('older')">Senior</button>
+    </div>
+    <a href="login.html" class="nav-item active" id="sidebar-login-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>Login
+    </a>
+  </div>
+  <button class="topnav-burger" onclick="toggleSidebar()" title="Menu" aria-label="Menu">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+    </svg>
+  </button>
+</nav>
+<!-- Mobile drawer -->
+<div class="topnav-drawer" id="topnav-drawer">
+  <div class="drawer-header">
+    <a href="index.html" class="topnav-logo">Social<span>Proof</span></a>
+    <button class="drawer-close-btn" onclick="toggleSidebar()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
     </button>
   </div>
-  <nav class="sidebar-nav">
-    <a href="index.html" class="nav-item">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-      Evaluate
+  <nav class="drawer-nav">
+    <a href="index.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>Practice
     </a>
-    <div class="nav-group" id="nav-group-lessons">
-      <button class="nav-group-toggle" id="nav-lessons-toggle" onclick="toggleNavGroup('lessons')">
-        <span class="toggle-left">
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-          Lessons
-        </span>
-      </button>
-      <div class="nav-sub" id="nav-sub-lessons">
-        <a href="lessons.html" class="nav-sub-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-          Lessons &amp; Quiz
-        </a>
-        <a href="lessons.html#prebunking" class="nav-sub-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 0-2-2V9m0 0h18"/></svg>
-          Prebunking Lab
-        </a>
-      </div>
-    </div>
-    <a href="mindmap.html" class="nav-item">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-      Mind Map
+    <a href="lessons.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>Lessons
+    </a>
+    <a href="mindmap.html" class="nav-item user-only-nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>My Map
     </a>
     <a href="dashboard.html" class="nav-item">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-      Dashboard
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>Dashboard
+    </a>
+    <a href="login.html" class="nav-item active topnav-login" id="sidebar-login-link-m">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>Login
     </a>
   </nav>
-
-  <div class="sidebar-section">Age Mode</div>
-  <div class="age-mode-grid">
-    <button class="age-pill" id="age-youth"  onclick="setAgeMode('youth')">Youth</button>
-    <button class="age-pill" id="age-adult" onclick="setAgeMode('adult')">Adult</button>
-    <button class="age-pill" id="age-older" onclick="setAgeMode('older')">Seniors</button>
+  <div class="drawer-age">
+    <div class="sidebar-section">Age Mode</div>
+    <div class="age-mode-grid">
+      <button class="age-pill" id="age-youth-m"  onclick="setAgeMode('youth')">Youth</button>
+      <button class="age-pill" id="age-adult-m" onclick="setAgeMode('adult')">Adult</button>
+      <button class="age-pill" id="age-older-m" onclick="setAgeMode('older')">Senior</button>
+    </div>
   </div>
-  <div class="sidebar-footer">
-    <a href="login.html" class="nav-item active" id="sidebar-login-link">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
-        <polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
-      </svg>
-      Login
-    </a>
-  </div>
-</aside>
-<div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
-<button class="burger-btn" id="burger-btn" onclick="toggleSidebar()" title="Open menu">
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
-  </svg>
-</button>
+</div>
+<div class="topnav-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+<div class="glow-blob"></div>
 
 <div class="main" id="main">
 <div class="app">
@@ -144,7 +325,7 @@
       <div class="form-group">
         <label class="form-label">Password</label>
         <div class="input-wrap">
-          <input class="form-input" id="login-password" type="password" placeholder="••••••••" autocomplete="current-password">
+          <input class="form-input" id="login-password" type="password" placeholder="••••••••" autocomplete="current-password" maxlength="72">
           <button class="toggle-pw" type="button" onclick="togglePw('login-password', this)" aria-label="Show password"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
         </div>
         <span class="forgot-link" onclick="showForgot()">Forgot password?</span>
@@ -179,7 +360,7 @@
       <div class="form-group">
         <label class="form-label">Password</label>
         <div class="input-wrap">
-          <input class="form-input" id="reg-password" type="password" placeholder="at least 8 characters" autocomplete="new-password" oninput="checkStrength()">
+          <input class="form-input" id="reg-password" type="password" placeholder="at least 8 characters" autocomplete="new-password" oninput="checkStrength()" maxlength="72">
           <button class="toggle-pw" type="button" onclick="togglePw('reg-password', this)" aria-label="Show password"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
         </div>
         <div class="pw-strength" id="pw-strength">
@@ -200,7 +381,7 @@
       <div class="form-group">
         <label class="form-label">Confirm Password</label>
         <div class="input-wrap">
-          <input class="form-input" id="reg-confirm" type="password" placeholder="repeat your password" autocomplete="new-password" oninput="validateConfirm()">
+          <input class="form-input" id="reg-confirm" type="password" placeholder="repeat your password" autocomplete="new-password" oninput="validateConfirm()" maxlength="72">
           <button class="toggle-pw" type="button" onclick="togglePw('reg-confirm', this)" aria-label="Show password"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
         </div>
         <div class="form-error" id="err-reg-confirm">Passwords do not match.</div>
@@ -210,6 +391,12 @@
         <input type="checkbox" id="accept-anon">
         <label for="accept-anon">I understand that evaluations submitted before login were anonymous and cannot be linked to my account</label>
       </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="research-consent">
+        <label for="research-consent">I agree to the anonymous use of my activity data for research purposes. You may withdraw consent at any time from your account settings.</label>
+      </div>
+      <div class="form-error" id="err-research-consent">You must agree to participate in the research to create an account.</div>
 
       <button id="btn-register" class="btn btn-primary" onclick="submitRegister()">Create Account →</button>
       <div class="anon-strip" style="margin-top:1rem;">

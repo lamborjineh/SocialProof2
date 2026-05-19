@@ -1,37 +1,25 @@
 """
-SocialProof — SQLAlchemy ORM Models v4.0
-Mirrors the live socialproof_db schema exactly.
+Active tables (33):
+  admin_audit_log, confidence_snapshots, email_verification_tokens,
+  eval_question_branches, eval_questions, lesson_completions, lessons,
+  lessons_triggered, mbfc_domains, mindmap_edges, mindmap_interactions,
+  mindmap_lens_progress, mindmap_nodes, mindmap_progress, mindmap_suggestions,
+  password_reset_tokens, pretest_claims, pretest_results, quiz_attempts,
+  quiz_questions, research_consent_log, source_diversity_log, submissions,
+  url_tracking, user_behavior_profile, user_created_content, user_reflections,
+  user_skill_history, user_skill_progress, users
 
-v4.0 Changes vs v3.2:
-  - `evaluations` table renamed to `submissions`.
-      EvaluationORM → SubmissionORM
-      All FK columns named evaluation_id → submission_id throughout.
-  - `system_score` and `analysis_json` columns removed from SubmissionORM
-      (were on the old evaluations table — pipeline results are no longer
-      persisted as a raw JSON blob or a single integer score).
-  - `evidence` table: `similarity_score` column removed.
-  - `user_evaluations` table: REMOVED entirely.
-  - `re_evaluations` table: REMOVED entirely.
-  - `reviews` table: REMOVED entirely.
-  - `review_votes` table: REMOVED entirely.
-  - `lessons` table:
-      + `updated_at` column added (tracks last admin edit).
-      + `is_published` column added (tinyint flag; admin can draft/publish).
-      No seed data — lessons are managed entirely via the admin dashboard
-      (POST /admin/lessons, PUT /admin/lessons/{id}, DELETE /admin/lessons/{id}).
-  - `lessons_triggered` table:
-      `user_evaluation_id` FK renamed to `submission_id` → references submissions.
-  - `url_tracking` table:
-      `evaluation_id` column renamed to `submission_id`.
-  - `user_behavior_profile` table:
-      `total_evaluations` column renamed to `total_submissions`.
-  - init_mysql_schema() updated: only safe, idempotent migrations retained;
-      all references to dropped tables and columns removed.
+Previously raw-SQL-only tables now with ORM classes (added in this cleanup):
+  eval_question_branches — branching follow-up prompts per eval question
+  pretest_claims         — managed claim pool for pre/post-test questions
+  user_created_content   — user-authored corrective summaries and cohort posts
 
-Active tables (11):
-  claims, submissions, evidence, factcheck_cache, lesson_completions,
-  lessons, lessons_triggered, mbfc_domains, pretest_results, quiz_attempts,
-  quiz_questions, url_tracking, user_behavior_profile, user_skill_progress, users
+Removed in a prior cleanup:
+  claims          — leftover fact-checking schema; label enum encoded system verdicts.
+                    Nothing inserted into this table in any router or pipeline.
+  evidence        — FK child of claims; removed with it.
+  factcheck_cache — cached Google Fact Check API responses; get_factcheck_results()
+                    was never called by any router. Removed along with the function.
 """
 
 from datetime import datetime, timezone
@@ -39,11 +27,11 @@ from datetime import datetime, timezone
 import sqlalchemy as sa
 from sqlalchemy import (
     Column, Integer, String, Text, Float,
-    DateTime, SmallInteger,
+    DateTime, SmallInteger, ForeignKey,
     Enum as SAEnum,
     create_engine,
 )
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import declarative_base, relationship
 
 from config import DATABASE_URL, logger
 
@@ -55,21 +43,75 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
 
 class UserORM(Base):
     __tablename__ = "users"
-    id            = Column(Integer, primary_key=True, autoincrement=True)
-    username      = Column(String(50),  nullable=False, unique=True)
-    email         = Column(String(150), nullable=False, unique=True)
-    password_hash = Column(String(255), nullable=False)
-    role          = Column(SAEnum("user", "admin"), nullable=False, default="user")
-    is_verified   = Column(SmallInteger, nullable=False, default=0)
-    created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    id                     = Column(Integer, primary_key=True, autoincrement=True)
+    username               = Column(String(50),  nullable=False, unique=True)
+    email                  = Column(String(150), nullable=False, unique=True)
+    password_hash          = Column(String(255), nullable=False)
+    role                   = Column(SAEnum("user", "admin"), nullable=False, default="user")
+    is_verified            = Column(SmallInteger, nullable=False, default=0)
+    # ── Research consent (IRB-compliant) ──────────────────────────────────────
+    # research_consent:       1 = user agreed to research data use at registration
+    # research_consent_at:    UTC timestamp when consent was granted
+    # consent_withdrawn_at:   UTC timestamp if the user later withdrew consent;
+    #                         NULL means consent is still active.
+    # Any research query MUST filter: WHERE research_consent = 1
+    #                                  AND consent_withdrawn_at IS NULL
+    research_consent       = Column(SmallInteger, nullable=False, default=0)
+    research_consent_at    = Column(DateTime, nullable=True)
+    consent_withdrawn_at   = Column(DateTime, nullable=True)
+    created_at             = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at             = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class ResearchConsentLogORM(Base):
+    """
+    Immutable audit trail for every consent grant and withdrawal.
+    One row per action — never updated, never deleted.
+    Required for IRB compliance: proves consent was obtained and honours
+    withdrawal requests programmatically.
+    """
+    __tablename__  = "research_consent_log"
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    user_id        = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    action         = Column(SAEnum("granted", "withdrawn"), nullable=False)
+    ip_address     = Column(String(45),  nullable=True)   # IPv4 or IPv6
+    user_agent     = Column(String(500), nullable=True)
+    acted_at       = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class AdminAuditLogORM(Base):
+    """
+    Immutable audit trail for every admin-initiated mutation.
+
+    One row per action — never updated, never deleted.
+    Captures who did what to which resource, when, and from where.
+
+    `action`        : create | update | delete | role_change | upload | reorder
+    `resource_type` : user | lesson | quiz_question | eval_question | corpus
+    `resource_id`   : string representation of the affected record's PK
+                      (string so it works for both integer PKs and slug PKs)
+    `detail`        : JSON blob — key context fields (title, username, role, …)
+    """
+    __tablename__   = "admin_audit_log"
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    admin_id        = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    admin_username  = Column(String(50),   nullable=True)   # denormalised for display after user deletion
+    action          = Column(
+        SAEnum("create", "update", "delete", "role_change", "upload", "reorder"),
+        nullable=False,
+    )
+    resource_type   = Column(String(50),  nullable=False)
+    resource_id     = Column(String(100), nullable=True)    # NULL for bulk actions (reorder)
+    detail          = Column(Text,        nullable=True)    # JSON
+    ip_address      = Column(String(45),  nullable=True)
+    performed_at    = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class PasswordResetTokenORM(Base):
     __tablename__ = "password_reset_tokens"
     id         = Column(Integer, primary_key=True, autoincrement=True)
     user_id    = Column(Integer, nullable=False)
-    token_hash = Column(String(64), nullable=False, unique=True)  # SHA-256 of the raw token
+    token_hash = Column(String(64), nullable=False, unique=True)
     expires_at = Column(DateTime, nullable=False)
     used       = Column(SmallInteger, nullable=False, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -89,19 +131,14 @@ class MindmapLensProgressORM(Base):
     __tablename__ = "mindmap_lens_progress"
     id          = Column(Integer, primary_key=True, autoincrement=True)
     user_id     = Column(Integer, nullable=False)
-    lens_id     = Column(String(100), nullable=False)   # e.g. "claim_detection_beginner"
+    lens_id     = Column(String(100), nullable=False)
     explored_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class SubmissionORM(Base):
-    """
-    Renamed from EvaluationORM / evaluations table.
-    system_score and analysis_json removed — pipeline results are returned
-    directly in the API response and are not persisted as a blob.
-    """
     __tablename__ = "submissions"
     id            = Column(Integer, primary_key=True, autoincrement=True)
-    user_id       = Column(Integer, nullable=True)
+    user_id       = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     session_token = Column(String(64), nullable=False)
     input_type    = Column(SAEnum("text", "url", "image", "pdf", "file"), default="text")
     raw_content   = Column(Text, nullable=False)
@@ -109,46 +146,197 @@ class SubmissionORM(Base):
     status        = Column(SAEnum("pending", "analyzed", "complete"), default="pending")
     created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-
-class ClaimORM(Base):
-    __tablename__  = "claims"
-    id             = Column(Integer, primary_key=True, autoincrement=True)
-    submission_id  = Column(Integer, nullable=False)   # FK → submissions.id
-    claim_text     = Column(Text, nullable=False)
-    sentence_index = Column(Integer, nullable=True)
-    label          = Column(String(20), default="unverified")
-    confidence     = Column(Float, nullable=True)
+    # ORM relationships
+    lessons_triggered  = relationship("LessonsTriggeredORM", back_populates="submission", cascade="all, delete-orphan")
+    reflections        = relationship("UserReflectionORM",  back_populates="submission", cascade="all, delete-orphan")
+    confidence_snapshots = relationship("ConfidenceSnapshotORM", back_populates="submission", cascade="all, delete-orphan")
 
 
-class EvidenceORM(Base):
+# ── NEW v5.0: Reasoning Journal ───────────────────────────────────────────────
+
+class UserReflectionORM(Base):
     """
-    similarity_score removed — retrieval ranking is handled internally
-    by the pipeline and is not persisted to the DB.
+    Stores per-stage Reasoning Journal entries.
+
+    `stage` identifies where in the pipeline the reflection was captured:
+      'post_eval'       — after the user completes the 8 evaluation steps
+      'post_evidence'   — after reviewing retrieved articles
+      'post_verdict'    — after the user submits their final verdict
+
+    `bloom_level` is an integer 1–5 assigned by the frontend based on prompt:
+      1 = recall ("What did you notice?")
+      2 = understanding ("Why does that matter?")
+      3 = application ("What step would you check first?")
+      4 = analysis ("What technique did you spot?")
+      5 = evaluation ("Which source was more useful and why?")
+
+    This is the primary qualitative data source for:
+      - Bloom's Taxonomy L4–5 analysis
+      - Kirkpatrick Level 3 (behavior change evidence)
+      - Metacognitive calibration research
     """
-    __tablename__  = "evidence"
-    id             = Column(Integer, primary_key=True, autoincrement=True)
-    claim_id       = Column(Integer, nullable=False)
-    evidence_text  = Column(Text, nullable=False)
-    type           = Column(String(12), nullable=False)
-    source_url     = Column(String(2083), nullable=True)
-    source_label   = Column(String(255), nullable=True)
-    retrieved_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __tablename__     = "user_reflections"
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    submission_id     = Column(Integer, ForeignKey("submissions.id", ondelete="SET NULL"), nullable=True)    # FK → submissions.id (nullable for anon)
+    user_id           = Column(Integer, nullable=True)    # NULL for anonymous sessions
+    session_token     = Column(String(64), nullable=False)
+    stage             = Column(
+        SAEnum("post_eval", "post_evidence", "post_verdict"),
+        nullable=False,
+        default="post_verdict",
+    )
+    # The three Bloom's L4–5 reflection prompts
+    what_noticed      = Column(Text, nullable=True)       # "What did I notice about these articles?"
+    still_uncertain   = Column(Text, nullable=True)       # "What am I still uncertain about?"
+    would_check_next  = Column(Text, nullable=True)       # "What would I check next if this mattered to me?"
+    # Free-form reasoning (maps to existing r6-reasoning-input)
+    free_reasoning    = Column(Text, nullable=True)
+    # Position taken by user (supported / unsupported / uncertain)
+    verdict_position  = Column(String(20), nullable=True)
+    # Bloom's level of the deepest prompt answered (1–5)
+    bloom_level       = Column(Integer, nullable=True)
+    # Word count across all prompts — proxy for reflection depth
+    total_word_count  = Column(Integer, nullable=True)
+    submitted_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # ORM relationship
+    submission = relationship("SubmissionORM", back_populates="reflections")
 
 
-# ── Lesson / quiz tables ──────────────────────────────────────────────────────
+# ── NEW v5.0: Confidence Snapshots (Confidence Before vs After) ───────────────
+
+class ConfidenceSnapshotORM(Base):
+    """
+    Captures the user's confidence rating before and after seeing evidence.
+    Used to measure:
+      - Belief-updating (openness to revising opinion)
+      - Metacognitive calibration (Dunning-Kruger detection)
+      - MIL attitude shift as a measurable outcome
+
+    confidence_before: captured at Step 1 (before retrieval runs)
+    confidence_after:  captured at Step 8 / post-evidence stage
+    Scale: 1 (not at all confident) → 5 (extremely confident)
+    """
+    __tablename__       = "confidence_snapshots"
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    submission_id       = Column(Integer, ForeignKey("submissions.id", ondelete="SET NULL"), nullable=True)
+    user_id             = Column(Integer, nullable=True)
+    session_token       = Column(String(64), nullable=False)
+    confidence_before   = Column(Integer, nullable=True)   # 1–5
+    confidence_after    = Column(Integer, nullable=True)   # 1–5
+    # Derived: positive = updated belief, 0 = unchanged, negative = became more confident (possible Dunning-Kruger)
+    confidence_delta    = Column(Integer, nullable=True)
+    # Whether the system flagged a calibration gap at submit time
+    calibration_flag    = Column(SmallInteger, nullable=False, default=0)
+    # The user's confidence_level string from the eval ("high"/"medium"/"low") — kept for compat
+    confidence_label    = Column(String(10), nullable=True)
+    recorded_at         = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # ORM relationship
+    submission = relationship("SubmissionORM", back_populates="confidence_snapshots")
+
+
+# ── NEW v5.0: Source Diversity Log ────────────────────────────────────────────
+
+class SourceDiversityLogORM(Base):
+    """
+    Records the source-type composition of each retrieval result.
+    Enables UNESCO MIL alignment analysis — did the user see a diverse
+    information ecosystem, or a monoculture of one source type?
+
+    Counts are extracted from retrieved articles by inspect_source_diversity()
+    in pipeline/orchestrator.py before returning the response.
+    """
+    __tablename__      = "source_diversity_log"
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    submission_id      = Column(Integer, nullable=True)
+    session_token      = Column(String(64), nullable=False)
+    total_articles     = Column(Integer, nullable=False, default=0)
+    count_government   = Column(Integer, nullable=False, default=0)
+    count_academic     = Column(Integer, nullable=False, default=0)
+    count_news         = Column(Integer, nullable=False, default=0)
+    count_factcheck    = Column(Integer, nullable=False, default=0)
+    count_international= Column(Integer, nullable=False, default=0)
+    count_other        = Column(Integer, nullable=False, default=0)
+    # Diversity score 0.0–1.0: higher = more spread across categories
+    diversity_score    = Column(Float, nullable=True)
+    logged_at          = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+# ── v9.0: Dynamic lesson topics ──────────────────────────────────────────────
+
+class LessonTopicORM(Base):
+    """
+    Admin-manageable topic registry. Replaces the hard-coded ENUM on lessons/quiz.
+    Each row defines a topic key, display label, emoji icon, and a hue (0-359)
+    used to auto-generate consistent HSL colours everywhere in the UI.
+    """
+    __tablename__ = "lesson_topics"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    key        = Column(String(60),  nullable=False, unique=True)
+    label      = Column(String(100), nullable=False)
+    icon       = Column(String(10),  nullable=False, default="📄")
+    color_hue  = Column(Integer,     nullable=False, default=220)
+    sort_order = Column(Integer,     nullable=False, default=0)
+    quiz_limit = Column(Integer,     nullable=True)   # max questions shown per session; NULL = no limit
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+# ── NEW v5.0: Per-Skill History (sparkline data) ──────────────────────────────
+
+class UserSkillHistoryORM(Base):
+    """
+    Append-only log of skill level changes per user per topic.
+    One row is inserted every time user_skill_progress.current_level
+    advances (or regresses) for a topic.
+
+    Used by the dashboard to render a per-skill progress sparkline
+    instead of just the current level — enabling the thesis claim:
+    "Users improved specifically in source verification but struggled
+    with logical analysis."
+    """
+    __tablename__   = "user_skill_history"
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    user_id         = Column(Integer, nullable=True)
+    session_token   = Column(String(64), nullable=True)
+    topic           = Column(String(60), nullable=False)
+    level_from      = Column(SAEnum("beginner", "intermediate", "advanced"), nullable=True)
+    level_to        = Column(SAEnum("beginner", "intermediate", "advanced"), nullable=False)
+    quiz_accuracy   = Column(Float, nullable=True)   # accuracy at the time of this change
+    trigger_event   = Column(String(50), nullable=True)  # "quiz_pass" | "lesson_complete" | "manual"
+    changed_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+# ── Admin / eval tables ───────────────────────────────────────────────────────
+
+class EvalQuestionORM(Base):
+    """
+    Onboarding evaluation questions shown to new users before lessons are
+    assigned. Managed entirely via admin.py endpoints.
+
+    skip_lesson_id: if set, users who answer correctly skip that lesson.
+    mindmap_node_id: if set, completing this eval step unlocks the linked mindmap node.
+    """
+    __tablename__ = "eval_questions"
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    step_number     = Column(Integer, nullable=False, default=1)
+    title           = Column(String(255), nullable=False)
+    step_label      = Column(String(80), nullable=True)    # short label shown in progress bar
+    prompt          = Column(Text, nullable=False)
+    hint            = Column(Text, nullable=True)
+    input_type      = Column(String(32), nullable=False, default="text")
+    options         = Column(Text, nullable=True)          # JSON string of choices
+    is_active       = Column(SmallInteger, nullable=False, default=1)
+    skip_lesson_id  = Column(Integer, nullable=True)       # FK → lessons.id
+    step_link_type  = Column(String(32), nullable=True)    # url|lesson|quiz|mindmap|dashboard
+    step_link_value = Column(String(512), nullable=True)   # key/id/url depending on type
+    mindmap_node_id = Column(String(64), nullable=True)    # FK → mindmap_nodes.id; unlocks node on completion
+    created_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                             onupdate=lambda: datetime.now(timezone.utc))
+
 
 class LessonORM(Base):
-    """
-    Lessons are managed entirely via the admin dashboard.
-    No seed data is inserted at deploy time.
-    Admins create, edit, reorder, publish/unpublish, and delete lessons
-    through the /admin/lessons API endpoints.
-
-    New columns vs v3.x:
-      updated_at   — set automatically on every UPDATE; lets the dashboard
-                     display "last edited" timestamps.
-      is_published — 1 = visible to learners, 0 = draft (admin-only).
-    """
     __tablename__          = "lessons"
     id                     = Column(Integer, primary_key=True, autoincrement=True)
     lesson_key             = Column(String(100), nullable=False, unique=True)
@@ -163,26 +351,41 @@ class LessonORM(Base):
         SAEnum("beginner", "intermediate", "advanced"),
         nullable=False, default="beginner",
     )
-    mil_skill              = Column(String(50),  nullable=True)
-    sort_order             = Column(Integer,      nullable=True)
-    prerequisite_lesson_id = Column(Integer,      nullable=True)
+    image_url              = Column(String(512),  nullable=True)
+    mil_skill              = Column(String(50),   nullable=True)
+    sort_order             = Column(Integer,       nullable=True)
+    prerequisite_lesson_id = Column(Integer,       nullable=True)
     is_published           = Column(SmallInteger, nullable=False, default=1)
+    mindmap_node_id        = Column(String(64),   nullable=True)  # FK → mindmap_nodes.id; unlocks node on completion
     created_at             = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at             = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class LessonsTriggeredORM(Base):
-    """
-    submission_id replaces user_evaluation_id — references submissions
-    directly now that user_evaluations has been removed.
-    """
     __tablename__  = "lessons_triggered"
     id             = Column(Integer, primary_key=True, autoincrement=True)
-    submission_id  = Column(Integer, nullable=False)   # FK → submissions.id
-    lesson_id      = Column(Integer, nullable=False)
+    submission_id  = Column(Integer, ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False)
+    lesson_id      = Column(Integer, ForeignKey("lessons.id",     ondelete="CASCADE"), nullable=False)
     trigger_reason = Column(String(255), nullable=True)
     was_read       = Column(SmallInteger, nullable=False, default=0)
     triggered_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # ORM relationships
+    submission = relationship("SubmissionORM", back_populates="lessons_triggered")
+    lesson     = relationship("LessonORM")
+
+
+class TopicQuizLinkORM(Base):
+    """
+    Explicit mapping of which quiz questions belong to a topic.
+    When rows exist for a topic key, they override the default
+    auto-match (questions whose .topic field == topic key).
+    Managed via the admin Topics modal.
+    """
+    __tablename__ = "topic_quiz_links"
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    topic_key   = Column(String(60), nullable=False, index=True)
+    question_id = Column(Integer,    nullable=False)
 
 
 class QuizQuestionORM(Base):
@@ -198,7 +401,11 @@ class QuizQuestionORM(Base):
         SAEnum("beginner", "intermediate", "advanced"),
         nullable=True, default="beginner",
     )
+    hint          = Column(Text, nullable=True)
     image_url     = Column(String(512), nullable=True)
+    video_url     = Column(String(1024), nullable=True)
+    media_type    = Column(SAEnum("text", "image", "video", "file"), nullable=True, default="text")
+    mindmap_node_id = Column(String(64), nullable=True)  # FK → mindmap_nodes.id; unlocks node on correct answer
 
 
 class QuizAttemptORM(Base):
@@ -217,11 +424,7 @@ class UserSkillProgressORM(Base):
     id                = Column(Integer, primary_key=True, autoincrement=True)
     user_id           = Column(Integer, nullable=True)
     session_token     = Column(String(64), nullable=True)
-    topic             = Column(
-        SAEnum("claim_detection", "source_verification", "bias_detection",
-               "evidence_evaluation", "general"),
-        nullable=False,
-    )
+    topic             = Column(String(60), nullable=False)
     current_level     = Column(
         SAEnum("beginner", "intermediate", "advanced"),
         nullable=False, default="beginner",
@@ -256,23 +459,7 @@ class LessonCompletionORM(Base):
 
 # ── v3 tables (unchanged) ─────────────────────────────────────────────────────
 
-class FactcheckCacheORM(Base):
-    """
-    Caches Google Fact Check Tools API results to stay within the 100/day free quota.
-    """
-    __tablename__ = "factcheck_cache"
-    id           = Column(Integer, primary_key=True, autoincrement=True)
-    claim_hash   = Column(String(64),  nullable=False, unique=True)
-    claim_text   = Column(Text,        nullable=False)
-    results_json = Column(Text,        nullable=True)
-    queried_at   = Column(DateTime,    default=lambda: datetime.now(timezone.utc))
-    expires_at   = Column(DateTime,    nullable=True)
-
-
 class MBFCDomainORM(Base):
-    """
-    MBFC / iffy.news domain credibility cache. Populated by scripts/sync_mbfc.py (monthly).
-    """
     __tablename__      = "mbfc_domains"
     id                 = Column(Integer, primary_key=True, autoincrement=True)
     domain             = Column(String(255), nullable=False, unique=True)
@@ -285,9 +472,6 @@ class MBFCDomainORM(Base):
 
 
 class URLTrackingORM(Base):
-    """
-    submission_id replaces evaluation_id.
-    """
     __tablename__  = "url_tracking"
     id             = Column(Integer, primary_key=True, autoincrement=True)
     url            = Column(String(2083), nullable=False)
@@ -295,14 +479,11 @@ class URLTrackingORM(Base):
     domain         = Column(String(255),  nullable=True)
     submitted_by   = Column(Integer,      nullable=True)
     session_token  = Column(String(64),   nullable=True)
-    submission_id  = Column(Integer,      nullable=True)   # soft ref → submissions.id
+    submission_id  = Column(Integer,      nullable=True)
     submitted_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class UserBehaviorProfileORM(Base):
-    """
-    total_evaluations renamed to total_submissions.
-    """
     __tablename__            = "user_behavior_profile"
     id                       = Column(Integer, primary_key=True, autoincrement=True)
     user_id                  = Column(Integer, nullable=True)
@@ -319,46 +500,6 @@ class UserBehaviorProfileORM(Base):
     last_activity_at         = Column(DateTime, nullable=True)
     updated_at               = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-
-class PrebunkingTechniqueORM(Base):
-    """
-    Admin-managed technique registry for the Prebunking Lab.
-    Replaces the hardcoded TECHNIQUE_IDS list — add/remove techniques
-    via the admin dashboard without touching code.
-    """
-    __tablename__  = "prebunking_techniques"
-    id             = Column(Integer, primary_key=True, autoincrement=True)
-    technique_id   = Column(String(64),  nullable=False, unique=True)
-    name           = Column(String(255), nullable=False)
-    description    = Column(Text,        nullable=True)
-    module         = Column(Integer,     nullable=True)
-    sort_order     = Column(Integer,     nullable=False, default=0)
-    is_active      = Column(SmallInteger, nullable=False, default=1)
-    created_at     = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-
-class PrebunkingQuestionORM(Base):
-    """
-    Admin-managed questions for the Prebunking Lab exercises.
-    Each row is a multiple-choice scenario tied to one technique.
-    image_url optionally points to a scenario screenshot shown above the question.
-    """
-    __tablename__   = "prebunking_questions"
-    id              = Column(Integer, primary_key=True, autoincrement=True)
-    technique_id    = Column(String(64),  nullable=False)   # references prebunking_techniques.technique_id
-    question_text   = Column(Text,        nullable=False)
-    option_a        = Column(String(500), nullable=False)
-    option_b        = Column(String(500), nullable=False)
-    option_c        = Column(String(500), nullable=False)
-    option_d        = Column(String(500), nullable=False)
-    correct_answer  = Column(String(1),   nullable=False)   # 'A', 'B', 'C', or 'D'
-    explanation     = Column(Text,        nullable=True)
-    image_url       = Column(String(512), nullable=True)    # optional scenario image
-    created_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-
-# ── Auto-migration on startup ──────────────────────────────────────────────────
 
 class MindmapNodeORM(Base):
     __tablename__ = "mindmap_nodes"
@@ -425,22 +566,110 @@ class MindmapSuggestionORM(Base):
     reviewed_at     = Column(DateTime,   nullable=True)
 
 
+class EvalQuestionBranchORM(Base):
+    """
+    Branching follow-up prompts shown to users based on their answer to an
+    eval question. Managed via admin.py endpoints.
+
+    trigger_condition: 'equals' | 'includes' | 'skipped'
+    trigger_value:     the answer string that fires this branch (empty for 'skipped')
+    followup_type:     'hint' = informational nudge; 'block' = stops progression
+    lesson_id:         optional lesson to surface alongside the follow-up
+    """
+    __tablename__     = "eval_question_branches"
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    question_id       = Column(Integer, ForeignKey("eval_questions.id", ondelete="CASCADE"), nullable=False)
+    parent_branch_id  = Column(Integer, ForeignKey("eval_question_branches.id", ondelete="CASCADE"), nullable=True)
+    trigger_condition = Column(SAEnum("equals", "includes", "skipped", "any"), nullable=False, default="equals")
+    trigger_value     = Column(String(200), nullable=False, default="")
+    followup_prompt   = Column(Text, nullable=False)
+    followup_type     = Column(SAEnum("hint", "block"), nullable=False, default="hint")
+    input_type        = Column(String(32), nullable=True, default="none")
+    options           = Column(Text, nullable=True)
+    scale_min_label   = Column(String(100), nullable=True)
+    scale_max_label   = Column(String(100), nullable=True)
+    lesson_id         = Column(Integer, nullable=True)
+    content_type      = Column(String(32), nullable=True)
+    quiz_question_id  = Column(Integer, nullable=True)
+    content_url       = Column(String(512), nullable=True)
+    image_url         = Column(String(512), nullable=True)
+    file_url          = Column(String(512), nullable=True)
+    file_name         = Column(String(255), nullable=True)
+    link_label        = Column(String(255), nullable=True)
+    is_active         = Column(SmallInteger, nullable=False, default=1)
+    sort_order        = Column(Integer, nullable=False, default=0)
+    created_at        = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at        = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                               onupdate=lambda: datetime.now(timezone.utc))
+
+    question        = relationship("EvalQuestionORM", backref="branches")
+    nested_branches = relationship(
+        "EvalQuestionBranchORM",
+        foreign_keys="EvalQuestionBranchORM.parent_branch_id",
+        order_by="EvalQuestionBranchORM.sort_order",
+        lazy="selectin",
+    )
+
+
+class PretestClaimORM(Base):
+    """
+    Managed pool of questions used in the pre- and post-test.
+    Supports multiple question types: true_false, multiple_choice, yes_no, scale, open.
+
+    question_type:  'true_false' | 'multiple_choice' | 'yes_no' | 'scale' | 'open'
+    correct_answer: human-readable correct answer text (null for scale/open)
+    options:        JSON array of option strings for multiple_choice
+    correct_index:  0-based index into options for multiple_choice; 1=True/0=False for true_false
+    attempt_count:  running tally incremented by quiz.py on each attempt
+    """
+    __tablename__   = "pretest_claims"
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    text            = Column(Text, nullable=False)
+    question_type   = Column(String(32), nullable=False, default="true_false")
+    correct_answer  = Column(String(255), nullable=True, default="True")
+    options         = Column(Text, nullable=True)
+    correct_index   = Column(SmallInteger, nullable=False, default=0)
+    sort_order      = Column(Integer, nullable=False, default=0)
+    is_active       = Column(SmallInteger, nullable=False, default=1)
+    attempt_count   = Column(Integer, nullable=False, default=0)
+    created_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                             onupdate=lambda: datetime.now(timezone.utc))
+
+
+class UserCreatedContentORM(Base):
+    """
+    User-authored corrective summaries, reflection posts, and cohort-shared
+    posts. Created at Bloom's Level 6 (Create) in the analysis flow.
+
+    content_type: 'corrective_summary' | 'reflection_post' | 'cohort_share'
+    is_shared:    1 = opted in to cohort sharing for research analysis
+    bloom_level:  always 6 for this table (Create-level task)
+    """
+    __tablename__  = "user_created_content"
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    user_id        = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    session_token  = Column(String(64), nullable=False)
+    submission_id  = Column(Integer, nullable=True)
+    content_type   = Column(
+        SAEnum("corrective_summary", "reflection_post", "cohort_share"),
+        nullable=False, default="corrective_summary",
+    )
+    body           = Column(Text, nullable=False)
+    is_shared      = Column(SmallInteger, nullable=False, default=0)
+    bloom_level    = Column(SmallInteger, nullable=False, default=6)
+    created_at     = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 def init_mysql_schema():
     """
     Run safe migrations on startup. Every statement is idempotent.
-    Column additions check information_schema before running ALTER TABLE.
-    New tables use CREATE TABLE IF NOT EXISTS.
-
-    v4.0 note: submissions, evidence (without similarity_score), and the
-    updated lessons table are the authoritative structures. The old
-    evaluations table and the four removed tables (user_evaluations,
-    re_evaluations, reviews, review_votes) are NOT recreated here.
-    If migrating a live database, drop those tables manually after
-    verifying no active references remain.
+    v5.0: adds user_reflections, confidence_snapshots, source_diversity_log,
+    user_skill_history tables and their column-level safe migrations.
     """
 
     new_tables_sql = [
-        # submissions (replaces evaluations — system_score & analysis_json gone)
+        # ── original tables (unchanged) ───────────────────────────────────────
         """CREATE TABLE IF NOT EXISTS submissions (
             id            INT UNSIGNED NOT NULL AUTO_INCREMENT,
             user_id       INT UNSIGNED NULL,
@@ -457,37 +686,6 @@ def init_mysql_schema():
                 FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
         )""",
 
-        # claims (submission_id FK)
-        """CREATE TABLE IF NOT EXISTS claims (
-            id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
-            submission_id  INT UNSIGNED NOT NULL,
-            claim_text     TEXT         NOT NULL,
-            sentence_index TINYINT UNSIGNED NULL,
-            label          ENUM('supported','misleading','neutral','unverified')
-                               NOT NULL DEFAULT 'unverified',
-            confidence     FLOAT NULL,
-            PRIMARY KEY (`id`),
-            KEY `idx_claims_submission` (`submission_id`),
-            CONSTRAINT `claims_ibfk_1`
-                FOREIGN KEY (`submission_id`) REFERENCES `submissions` (`id`) ON DELETE CASCADE
-        )""",
-
-        # evidence (no similarity_score)
-        """CREATE TABLE IF NOT EXISTS evidence (
-            id            INT UNSIGNED NOT NULL AUTO_INCREMENT,
-            claim_id      INT UNSIGNED NOT NULL,
-            evidence_text TEXT         NOT NULL,
-            type          ENUM('support','contradict','neutral') NOT NULL,
-            source_url    VARCHAR(2083) NULL,
-            source_label  VARCHAR(255)  NULL,
-            retrieved_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (`id`),
-            KEY `idx_evidence_claim` (`claim_id`),
-            CONSTRAINT `evidence_ibfk_1`
-                FOREIGN KEY (`claim_id`) REFERENCES `claims` (`id`) ON DELETE CASCADE
-        )""",
-
-        # lessons (with is_published and updated_at; no seed data)
         """CREATE TABLE IF NOT EXISTS lessons (
             id                     INT UNSIGNED NOT NULL AUTO_INCREMENT,
             lesson_key             VARCHAR(100) NOT NULL,
@@ -509,7 +707,6 @@ def init_mysql_schema():
             UNIQUE KEY `lesson_key` (`lesson_key`)
         )""",
 
-        # lessons_triggered (submission_id replaces user_evaluation_id)
         """CREATE TABLE IF NOT EXISTS lessons_triggered (
             id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
             submission_id  INT UNSIGNED NOT NULL,
@@ -576,17 +773,6 @@ def init_mysql_schema():
             INDEX idx_mbfc_domain (domain)
         )""",
 
-        """CREATE TABLE IF NOT EXISTS factcheck_cache (
-            id           INT AUTO_INCREMENT PRIMARY KEY,
-            claim_hash   VARCHAR(64) NOT NULL UNIQUE,
-            claim_text   TEXT        NOT NULL,
-            results_json TEXT        NULL,
-            queried_at   DATETIME    DEFAULT CURRENT_TIMESTAMP,
-            expires_at   DATETIME    NULL,
-            INDEX idx_fc_hash (claim_hash)
-        )""",
-
-        # url_tracking (submission_id replaces evaluation_id)
         """CREATE TABLE IF NOT EXISTS url_tracking (
             id            INT AUTO_INCREMENT PRIMARY KEY,
             url           VARCHAR(2083) NOT NULL,
@@ -602,38 +788,6 @@ def init_mysql_schema():
             INDEX idx_ut_user       (submitted_by),
             INDEX idx_ut_submission (submission_id)
         )""",
-
-        # prebunking_questions — admin-managed scenarios for Prebunking Lab
-        """CREATE TABLE IF NOT EXISTS prebunking_techniques (
-            id           INT AUTO_INCREMENT PRIMARY KEY,
-            technique_id VARCHAR(64)  NOT NULL UNIQUE,
-            name         VARCHAR(255) NOT NULL,
-            description  TEXT         NULL,
-            module       INT          NULL,
-            sort_order   INT          NOT NULL DEFAULT 0,
-            is_active    TINYINT(1)   NOT NULL DEFAULT 1,
-            created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_pbt_active (is_active)
-        )""",
-
-        """CREATE TABLE IF NOT EXISTS prebunking_questions (
-            id             INT AUTO_INCREMENT PRIMARY KEY,
-            technique_id   VARCHAR(64)  NOT NULL,
-            question_text  TEXT         NOT NULL,
-            option_a       VARCHAR(500) NOT NULL,
-            option_b       VARCHAR(500) NOT NULL,
-            option_c       VARCHAR(500) NOT NULL,
-            option_d       VARCHAR(500) NOT NULL,
-            correct_answer VARCHAR(1)   NOT NULL,
-            explanation    TEXT         NULL,
-            image_url      VARCHAR(512) NULL,
-            created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
-                               ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_pbq_technique (technique_id)
-        )""",
-
-        # user_behavior_profile (total_submissions replaces total_evaluations)
         """CREATE TABLE IF NOT EXISTS user_behavior_profile (
             id                        INT AUTO_INCREMENT PRIMARY KEY,
             user_id                   INT          NULL,
@@ -654,7 +808,7 @@ def init_mysql_schema():
             INDEX idx_ubp_user        (user_id),
             INDEX idx_ubp_session     (session_token)
         )""",
-        # password_reset_tokens
+
         """CREATE TABLE IF NOT EXISTS password_reset_tokens (
             id         INT          NOT NULL AUTO_INCREMENT,
             user_id    INT UNSIGNED NOT NULL,
@@ -668,7 +822,6 @@ def init_mysql_schema():
             INDEX idx_prt_expiry (expires_at)
         )""",
 
-        # email_verification_tokens
         """CREATE TABLE IF NOT EXISTS email_verification_tokens (
             id         INT          NOT NULL AUTO_INCREMENT,
             user_id    INT UNSIGNED NOT NULL,
@@ -682,7 +835,6 @@ def init_mysql_schema():
             INDEX idx_evt_expiry (expires_at)
         )""",
 
-        # mindmap_lens_progress
         """CREATE TABLE IF NOT EXISTS mindmap_lens_progress (
             id          INT          NOT NULL AUTO_INCREMENT,
             user_id     INT UNSIGNED NOT NULL,
@@ -693,7 +845,6 @@ def init_mysql_schema():
             INDEX idx_mlp_user (user_id)
         )""",
 
-        # ── Dynamic mindmap tables ─────────────────────────────────────────
         """CREATE TABLE IF NOT EXISTS mindmap_nodes (
             id            VARCHAR(64)  NOT NULL,
             map_id        VARCHAR(32)  NOT NULL DEFAULT 'main',
@@ -767,6 +918,121 @@ def init_mysql_schema():
             KEY idx_ms_user   (user_id)
         )""",
 
+        # ── NEW v5.0 tables ───────────────────────────────────────────────────
+
+        """CREATE TABLE IF NOT EXISTS user_reflections (
+            id               INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            submission_id    INT UNSIGNED NULL,
+            user_id          INT UNSIGNED NULL,
+            session_token    VARCHAR(64)  NOT NULL,
+            stage            ENUM('post_eval','post_evidence','post_verdict')
+                                 NOT NULL DEFAULT 'post_verdict',
+            what_noticed     TEXT         NULL,
+            still_uncertain  TEXT         NULL,
+            would_check_next TEXT         NULL,
+            free_reasoning   TEXT         NULL,
+            verdict_position VARCHAR(20)  NULL,
+            bloom_level      TINYINT      NULL,
+            total_word_count INT          NULL,
+            submitted_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_ur_submission (submission_id),
+            KEY idx_ur_user       (user_id),
+            KEY idx_ur_session    (session_token),
+            KEY idx_ur_stage      (stage)
+        )""",
+
+        """CREATE TABLE IF NOT EXISTS confidence_snapshots (
+            id                INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            submission_id     INT UNSIGNED NULL,
+            user_id           INT UNSIGNED NULL,
+            session_token     VARCHAR(64)  NOT NULL,
+            confidence_before TINYINT      NULL,
+            confidence_after  TINYINT      NULL,
+            confidence_delta  TINYINT      NULL,
+            calibration_flag  TINYINT(1)   NOT NULL DEFAULT 0,
+            confidence_label  VARCHAR(10)  NULL,
+            recorded_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_cs_submission (submission_id),
+            KEY idx_cs_user       (user_id),
+            KEY idx_cs_session    (session_token)
+        )""",
+
+        """CREATE TABLE IF NOT EXISTS source_diversity_log (
+            id                  INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            submission_id       INT UNSIGNED NULL,
+            session_token       VARCHAR(64)  NOT NULL,
+            total_articles      INT          NOT NULL DEFAULT 0,
+            count_government    INT          NOT NULL DEFAULT 0,
+            count_academic      INT          NOT NULL DEFAULT 0,
+            count_news          INT          NOT NULL DEFAULT 0,
+            count_factcheck     INT          NOT NULL DEFAULT 0,
+            count_international INT          NOT NULL DEFAULT 0,
+            count_other         INT          NOT NULL DEFAULT 0,
+            diversity_score     FLOAT        NULL,
+            logged_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_sdl_submission (submission_id),
+            KEY idx_sdl_session    (session_token)
+        )""",
+
+        """CREATE TABLE IF NOT EXISTS user_skill_history (
+            id            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            user_id       INT          NULL,
+            session_token VARCHAR(64)  NULL,
+            topic         ENUM('claim_detection','source_verification','bias_detection',
+                               'evidence_evaluation','general') NOT NULL,
+            level_from    ENUM('beginner','intermediate','advanced') NULL,
+            level_to      ENUM('beginner','intermediate','advanced') NOT NULL,
+            quiz_accuracy FLOAT        NULL,
+            trigger_event VARCHAR(50)  NULL,
+            changed_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_ush_user    (user_id),
+            KEY idx_ush_session (session_token),
+            KEY idx_ush_topic   (topic)
+        )""",
+
+        # ── NEW v6.0 tables ───────────────────────────────────────────────────
+
+        """CREATE TABLE IF NOT EXISTS eval_questions (
+            id             INT          NOT NULL AUTO_INCREMENT,
+            step_number    INT          NOT NULL DEFAULT 1,
+            title          VARCHAR(255) NOT NULL,
+            prompt         TEXT         NOT NULL,
+            hint           TEXT         NULL,
+            input_type     VARCHAR(32)  NOT NULL DEFAULT 'text',
+            options        TEXT         NULL,
+            is_active      TINYINT(1)   NOT NULL DEFAULT 1,
+            skip_lesson_id INT          NULL,
+            created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                               ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_eq_step   (step_number),
+            KEY idx_eq_active (is_active)
+        )""",
+        # ── NEW checklist additions ───────────────────────────────────────────
+
+        # b3/m2: L6 Create task — user-authored corrective summaries and cohort-shared posts
+        """CREATE TABLE IF NOT EXISTS user_created_content (
+            id               INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            user_id          INT UNSIGNED NULL,
+            session_token    VARCHAR(64)  NOT NULL,
+            submission_id    INT UNSIGNED NULL,
+            content_type     ENUM('corrective_summary','reflection_post','cohort_share')
+                                 NOT NULL DEFAULT 'corrective_summary',
+            body             TEXT         NOT NULL,
+            is_shared        TINYINT(1)   NOT NULL DEFAULT 0,
+            bloom_level      TINYINT      NOT NULL DEFAULT 6,
+            created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_ucc_user       (user_id),
+            KEY idx_ucc_session    (session_token),
+            KEY idx_ucc_submission (submission_id),
+            KEY idx_ucc_shared     (is_shared)
+        )""",
     ]
 
     with engine.connect() as conn:
@@ -777,70 +1043,112 @@ def init_mysql_schema():
             except Exception as e:
                 logger.warning(f"[Migration] Table creation skipped: {e}")
 
-    # ── Seed default prebunking techniques (INSERT IGNORE = idempotent) ───────
-    seed_techniques = """
-    INSERT IGNORE INTO prebunking_techniques
-        (technique_id, name, description, module, sort_order)
-    VALUES
-        ('emotional_override', 'Emotional Override',
-         'Manipulates by triggering strong emotions to bypass critical thinking.', 6, 10),
-        ('false_authority',    'False Authority',
-         'Cites fake or irrelevant experts to lend undeserved credibility.', 6, 20),
-        ('cherry_pick',        'Cherry-Picked Statistics',
-         'Selects only data points that support a conclusion while hiding contradictions.', 7, 30),
-        ('false_dichotomy',    'False Dichotomy',
-         'Presents only two options when more exist, forcing a manufactured choice.', 7, 40),
-        ('conspiracy_framing', 'Conspiracy Framing',
-         'Frames events as secret plots without verifiable evidence.', 8, 50),
-        ('impersonation',      'Source Impersonation',
-         'Fakes the identity of a credible source to spread misinformation.', 8, 60)
-    """
+    # ── v7.0: Research consent audit log ─────────────────────────────────────
+    # Immutable per-action audit trail. Never updated or deleted.
+    # IRB requirement: proves consent was obtained and records withdrawals.
     try:
         with engine.begin() as conn:
-            conn.execute(sa.text(seed_techniques))
+            conn.execute(sa.text("""
+                CREATE TABLE IF NOT EXISTS research_consent_log (
+                    id          INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    user_id     INT UNSIGNED NOT NULL,
+                    action      ENUM('granted','withdrawn') NOT NULL,
+                    ip_address  VARCHAR(45)  NULL,
+                    user_agent  VARCHAR(500) NULL,
+                    acted_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    INDEX idx_rcl_user (user_id),
+                    CONSTRAINT fk_rcl_user FOREIGN KEY (user_id)
+                        REFERENCES users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+            """))
+        logger.info("[Migration] research_consent_log table ensured.")
     except Exception as e:
-        logger.warning(f"[Migration] Technique seed skipped: {e}")
+        logger.warning(f"[Migration] research_consent_log creation skipped: {e}")
 
-    # ── Safe column additions for lessons admin features ──────────────────────
+    # ── Safe column additions ─────────────────────────────────────────────────
     column_migrations = [
-        (
-            "lessons", "is_published",
-            "ALTER TABLE lessons ADD COLUMN is_published TINYINT(1) NOT NULL DEFAULT 1"
-        ),
-        (
-            "lessons", "updated_at",
-            "ALTER TABLE lessons ADD COLUMN updated_at DATETIME NOT NULL "
-            "DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
-        ),
-        (
-            "lessons", "mil_skill",
-            "ALTER TABLE lessons ADD COLUMN mil_skill VARCHAR(50) NULL"
-        ),
-        (
-            "lessons", "sort_order",
-            "ALTER TABLE lessons ADD COLUMN sort_order INT NULL"
-        ),
-        (
-            "lessons", "prerequisite_lesson_id",
-            "ALTER TABLE lessons ADD COLUMN prerequisite_lesson_id INT NULL"
-        ),
-        (
-            "quiz_questions", "difficulty",
-            "ALTER TABLE quiz_questions ADD COLUMN difficulty "
-            "ENUM('beginner','intermediate','advanced') NULL DEFAULT 'beginner'"
-        ),
-        (
-            "quiz_questions", "image_url",
-            "ALTER TABLE quiz_questions ADD COLUMN image_url VARCHAR(512) NULL"
-        ),
-        (
-            "prebunking_questions", "image_url",
-            "ALTER TABLE prebunking_questions ADD COLUMN image_url VARCHAR(512) NULL"
-        ),
-        (
-            "users", "is_verified",
-            "ALTER TABLE users ADD COLUMN is_verified TINYINT(1) NOT NULL DEFAULT 0"
-        ),
+        ("lessons", "image_url",
+         "ALTER TABLE lessons ADD COLUMN image_url VARCHAR(512) NULL AFTER content"),
+        ("lessons", "is_published",
+         "ALTER TABLE lessons ADD COLUMN is_published TINYINT(1) NOT NULL DEFAULT 1"),
+        ("lessons", "updated_at",
+         "ALTER TABLE lessons ADD COLUMN updated_at DATETIME NOT NULL "
+         "DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"),
+        ("lessons", "mil_skill",
+         "ALTER TABLE lessons ADD COLUMN mil_skill VARCHAR(50) NULL"),
+        ("lessons", "sort_order",
+         "ALTER TABLE lessons ADD COLUMN sort_order INT NULL"),
+        ("lessons", "prerequisite_lesson_id",
+         "ALTER TABLE lessons ADD COLUMN prerequisite_lesson_id INT NULL"),
+        ("quiz_questions", "difficulty",
+         "ALTER TABLE quiz_questions ADD COLUMN difficulty "
+         "ENUM('beginner','intermediate','advanced') NULL DEFAULT 'beginner'"),
+        ("quiz_questions", "image_url",
+         "ALTER TABLE quiz_questions ADD COLUMN image_url VARCHAR(512) NULL"),
+        ("quiz_questions", "video_url",
+         "ALTER TABLE quiz_questions ADD COLUMN video_url VARCHAR(1024) NULL"),
+        ("quiz_questions", "media_type",
+         "ALTER TABLE quiz_questions ADD COLUMN media_type ENUM('text','image','video','file') NULL DEFAULT 'text'"),
+        ("quiz_questions", "hint",
+         "ALTER TABLE quiz_questions ADD COLUMN hint TEXT NULL"),
+        ("lesson_topics", "quiz_limit",
+         "ALTER TABLE lesson_topics ADD COLUMN quiz_limit INT NULL COMMENT 'Max quiz questions per session; NULL = no limit'"),
+        ("pretest_results", "days_between",
+         "ALTER TABLE pretest_results ADD COLUMN days_between FLOAT NULL COMMENT 'Days between pretest and posttest for longitudinal pairing'"),
+        ("pretest_results", "score_gain_pct",
+         "ALTER TABLE pretest_results ADD COLUMN score_gain_pct FLOAT NULL COMMENT 'score_pct(posttest) - score_pct(pretest)'"),
+        ("users", "is_verified",
+         "ALTER TABLE users ADD COLUMN is_verified TINYINT(1) NOT NULL DEFAULT 0"),
+        # ── v7.0: IRB research consent fields ─────────────────────────────────
+        ("users", "research_consent",
+         "ALTER TABLE users ADD COLUMN research_consent TINYINT(1) NOT NULL DEFAULT 0"),
+        ("users", "research_consent_at",
+         "ALTER TABLE users ADD COLUMN research_consent_at DATETIME NULL"),
+        ("users", "consent_withdrawn_at",
+         "ALTER TABLE users ADD COLUMN consent_withdrawn_at DATETIME NULL"),
+        ("eval_questions", "step_label",
+         "ALTER TABLE eval_questions ADD COLUMN step_label VARCHAR(80) NULL"),
+        ("eval_questions", "step_link_type",
+         "ALTER TABLE eval_questions ADD COLUMN step_link_type VARCHAR(32) NULL"),
+        ("eval_questions", "step_link_value",
+         "ALTER TABLE eval_questions ADD COLUMN step_link_value VARCHAR(512) NULL"),
+        # ── v9.0: Follow-up branch full parity + nesting ──────────────────────
+        ("eval_question_branches", "parent_branch_id",
+         "ALTER TABLE eval_question_branches ADD COLUMN parent_branch_id INT NULL "
+         "COMMENT 'FK → eval_question_branches.id; NULL = top-level branch'"),
+        ("eval_question_branches", "input_type",
+         "ALTER TABLE eval_question_branches ADD COLUMN input_type VARCHAR(32) NULL DEFAULT 'none' "
+         "COMMENT 'none|text|textarea|multiple_choice|yes_no|scale|checkbox'"),
+        ("eval_question_branches", "options",
+         "ALTER TABLE eval_question_branches ADD COLUMN options TEXT NULL "
+         "COMMENT 'JSON [{value,label},...] for multiple_choice / checkbox / yes_no'"),
+        ("eval_question_branches", "scale_min_label",
+         "ALTER TABLE eval_question_branches ADD COLUMN scale_min_label VARCHAR(100) NULL"),
+        ("eval_question_branches", "scale_max_label",
+         "ALTER TABLE eval_question_branches ADD COLUMN scale_max_label VARCHAR(100) NULL"),
+        ("eval_question_branches", "image_url",
+         "ALTER TABLE eval_question_branches ADD COLUMN image_url VARCHAR(512) NULL "
+         "COMMENT 'Direct image URL for content_type=image'"),
+        ("eval_question_branches", "file_url",
+         "ALTER TABLE eval_question_branches ADD COLUMN file_url VARCHAR(512) NULL "
+         "COMMENT 'File download URL for content_type=file'"),
+        ("eval_question_branches", "file_name",
+         "ALTER TABLE eval_question_branches ADD COLUMN file_name VARCHAR(255) NULL "
+         "COMMENT 'Display filename for content_type=file'"),
+        ("eval_question_branches", "link_label",
+         "ALTER TABLE eval_question_branches ADD COLUMN link_label VARCHAR(255) NULL "
+         "COMMENT 'Button label for content_type=url'"),
+        # ── v10.0: mindmap_node_id unlock hooks ───────────────────────────────
+        ("quiz_questions", "mindmap_node_id",
+         "ALTER TABLE quiz_questions ADD COLUMN mindmap_node_id VARCHAR(64) NULL "
+         "COMMENT 'FK → mindmap_nodes.id; correct answer unlocks this node'"),
+        ("lessons", "mindmap_node_id",
+         "ALTER TABLE lessons ADD COLUMN mindmap_node_id VARCHAR(64) NULL "
+         "COMMENT 'FK → mindmap_nodes.id; reading this lesson unlocks this node'"),
+        ("eval_questions", "mindmap_node_id",
+         "ALTER TABLE eval_questions ADD COLUMN mindmap_node_id VARCHAR(64) NULL "
+         "COMMENT 'FK → mindmap_nodes.id; completing this eval step unlocks this node'"),
     ]
 
     with engine.connect() as conn:
@@ -858,7 +1166,6 @@ def init_mysql_schema():
             except Exception as e:
                 logger.warning(f"[Migration] {table}.{column}: {e}")
 
-    # ── Enum expansion ────────────────────────────────────────────────────────
     enum_migrations = [
         """ALTER TABLE submissions
            MODIFY COLUMN input_type ENUM('text','url','image','pdf','file')
@@ -872,3 +1179,109 @@ def init_mysql_schema():
                 conn.commit()
             except Exception as e:
                 logger.warning(f"[Migration] Enum expand skipped: {e}")
+
+    # ── v8.0: Admin audit log ─────────────────────────────────────────────────
+    # Immutable per-action trail for every admin mutation. Never updated/deleted.
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text("""
+                CREATE TABLE IF NOT EXISTS admin_audit_log (
+                    id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    admin_id       INT UNSIGNED NULL,
+                    admin_username VARCHAR(50)  NULL,
+                    action         ENUM('create','update','delete','role_change','upload','reorder') NOT NULL,
+                    resource_type  VARCHAR(50)  NOT NULL,
+                    resource_id    VARCHAR(100) NULL,
+                    detail         TEXT         NULL,
+                    ip_address     VARCHAR(45)  NULL,
+                    performed_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    INDEX idx_aal_admin       (admin_id),
+                    INDEX idx_aal_resource    (resource_type, resource_id),
+                    INDEX idx_aal_performed   (performed_at),
+                    CONSTRAINT fk_aal_admin FOREIGN KEY (admin_id)
+                        REFERENCES users(id) ON DELETE SET NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+            """))
+        logger.info("[Migration] admin_audit_log table ensured.")
+    except Exception as e:
+        logger.warning(f"[Migration] admin_audit_log creation skipped: {e}")
+
+    # ── v9.0: Dynamic topic registry ─────────────────────────────────────────
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text("""
+                CREATE TABLE IF NOT EXISTS lesson_topics (
+                    id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `key`      VARCHAR(60)  NOT NULL,
+                    label      VARCHAR(100) NOT NULL,
+                    icon       VARCHAR(10)  NOT NULL DEFAULT '📄',
+                    color_hue  SMALLINT     NOT NULL DEFAULT 220,
+                    sort_order INT          NOT NULL DEFAULT 0,
+                    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uq_topic_key (`key`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """))
+        logger.info("[Migration] lesson_topics table ensured.")
+    except Exception as e:
+        logger.warning(f"[Migration] lesson_topics creation skipped: {e}")
+
+    # Seed built-in topics if table is empty
+    try:
+        with engine.begin() as conn:
+            count = conn.execute(sa.text("SELECT COUNT(*) FROM lesson_topics")).scalar()
+            if count == 0:
+                conn.execute(sa.text("""
+                    INSERT INTO lesson_topics (`key`, label, icon, color_hue, sort_order) VALUES
+                    ('claim_detection',    'Claim Detection',    '🎯', 220, 1),
+                    ('source_verification','Source Verification','🔍', 158, 2),
+                    ('bias_detection',     'Bias Detection',     '⚡',  38, 3),
+                    ('evidence_evaluation','Evidence Evaluation','📊', 340, 4),
+                    ('general',            'General MIL',        '📖', 260, 5)
+                """))
+        logger.info("[Migration] lesson_topics seeded with built-in topics.")
+    except Exception as e:
+        logger.warning(f"[Migration] lesson_topics seeding skipped: {e}")
+
+    # ── topic_quiz_links: explicit per-topic quiz question list ───────────────
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text("""
+                CREATE TABLE IF NOT EXISTS topic_quiz_links (
+                    id          INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    topic_key   VARCHAR(60)  NOT NULL,
+                    question_id INT          NOT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uq_tql (topic_key, question_id),
+                    INDEX idx_tql_topic (topic_key),
+                    INDEX idx_tql_qid   (question_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """))
+        logger.info("[Migration] topic_quiz_links table ensured.")
+    except Exception as e:
+        logger.warning(f"[Migration] topic_quiz_links creation skipped: {e}")
+
+    # Migrate ENUM → VARCHAR(60) so any topic key is accepted
+    enum_to_varchar = [
+        ("lessons",            "topic", "VARCHAR(60) NOT NULL"),
+        ("quiz_questions",     "topic", "VARCHAR(60) NOT NULL"),
+        ("user_skill_progress","topic", "VARCHAR(60) NOT NULL"),
+        ("user_skill_history", "topic", "VARCHAR(60) NOT NULL"),
+    ]
+    with engine.connect() as conn:
+        for table, column, col_def in enum_to_varchar:
+            try:
+                col_type = conn.execute(sa.text(
+                    "SELECT DATA_TYPE FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() "
+                    f"AND table_name = '{table}' AND column_name = '{column}'"
+                )).scalar()
+                if col_type and col_type.upper() == "ENUM":
+                    conn.execute(sa.text(
+                        f"ALTER TABLE `{table}` MODIFY COLUMN `{column}` {col_def}"
+                    ))
+                    conn.commit()
+                    logger.info(f"[Migration] {table}.{column} ENUM → VARCHAR(60)")
+            except Exception as e:
+                logger.warning(f"[Migration] {table}.{column} varchar migration skipped: {e}")

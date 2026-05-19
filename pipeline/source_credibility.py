@@ -3,7 +3,7 @@ SocialProof — pipeline/source_credibility.py  v4.0
 Evaluates source reliability based on domain type, HTTPS, and
 the tiered reputation registry in corpus/source_registry.py.
 
-v4.0 Changes vs v3.1:
+v4.0 Changes vs v3.0:
   - SourceCredibilityModule.evaluate() now accepts final_url separately from
     the raw input URL — ensures shortener-expanded domains are scored correctly
   - International gov domains added: .gov.uk, .gov.au, .gov.sg, .gc.ca,
@@ -15,18 +15,13 @@ v4.0 Changes vs v3.1:
   - Subdomain-aware gov scoring: deep subdomains of .gov still score as gov
   - _label() thresholds unchanged; all existing signals preserved
 
-v3.1 Changes (retained):
-  - Added get_factcheck_results() — async, queries Google Fact Check Tools API
-
 v3.0 Changes (retained):
   - Added get_mbfc_rating() — DB lookup, on-demand (Source node click)
 
 Architecture note:
   SourceCredibilityModule.evaluate() → fast, fully offline, always runs.
   get_mbfc_rating()                  → DB lookup, on-demand.
-  get_factcheck_results()            → async HTTP, on-demand (Source node click).
-  score_check_worthiness()           → async HTTP, auto-runs on Claim step (silent).
-  All API results are context for the user — never verdicts.
+  All results are context for the user — never verdicts.
 
 IMPORTANT: Always pass result["url"] from URLFetcher (the FINAL redirected URL)
 as the `final_url` argument to evaluate(). This ensures short-link domains like
@@ -41,7 +36,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
 from urllib.parse import urlparse
 
-from config import logger, GOOGLE_FACTCHECK_API_KEY, FACTCHECK_CACHE_TTL_HOURS
+from config import logger
 
 from corpus.source_registry import get_reputation, REPUTATION_THRESHOLD
 
@@ -391,75 +386,4 @@ class SourceCredibilityModule:
             return "Moderate Credibility"
         return "Low Credibility"
 
-
-# ── Async API helpers (v3.1, unchanged) ──────────────────────────────────────
-
-async def get_factcheck_results(claim_text: str) -> List[Dict]:
-    """
-    Query Google Fact Check Tools API for IFCN-certified reviews on a claim.
-    Results cached in factcheck_cache table (24hr TTL).
-    Returns context for the user — never a verdict.
-    """
-    if not GOOGLE_FACTCHECK_API_KEY:
-        return []
-
-    claim_hash = hashlib.sha256(claim_text.encode()).hexdigest()[:16]
-
-    try:
-        import sqlalchemy as sa
-        from database.models import engine
-
-        with engine.connect() as conn:
-            row = conn.execute(sa.text(
-                "SELECT results, fetched_at FROM factcheck_cache WHERE claim_hash = :h LIMIT 1"
-            ), {"h": claim_hash}).fetchone()
-
-        if row:
-            age = datetime.now(timezone.utc) - row[1]
-            if age < timedelta(hours=FACTCHECK_CACHE_TTL_HOURS):
-                return json.loads(row[0])
-
-    except Exception as e:
-        logger.warning(f"[FactCheck] Cache read failed: {e}")
-
-    try:
-        api_url = (
-            f"https://factchecktools.googleapis.com/v1alpha1/claims:search"
-            f"?query={urllib.parse.quote(claim_text)}&key={GOOGLE_FACTCHECK_API_KEY}"
-            f"&languageCode=en&pageSize=5"
-        )
-        import urllib.parse
-        with urllib.request.urlopen(api_url, timeout=8) as r:
-            data = json.loads(r.read())
-
-        results = [
-            {
-                "text":        c.get("text", ""),
-                "claimant":    c.get("claimant", ""),
-                "rating":      c.get("claimReview", [{}])[0].get("textualRating", ""),
-                "reviewer":    c.get("claimReview", [{}])[0].get("publisher", {}).get("name", ""),
-                "review_url":  c.get("claimReview", [{}])[0].get("url", ""),
-                "review_date": c.get("claimReview", [{}])[0].get("reviewDate", ""),
-            }
-            for c in data.get("claims", [])
-        ]
-
-        try:
-            import sqlalchemy as sa
-            from database.models import engine
-            with engine.connect() as conn:
-                conn.execute(sa.text(
-                    "INSERT INTO factcheck_cache (claim_hash, results, fetched_at) "
-                    "VALUES (:h, :r, :t) ON CONFLICT (claim_hash) DO UPDATE "
-                    "SET results = :r, fetched_at = :t"
-                ), {"h": claim_hash, "r": json.dumps(results), "t": datetime.now(timezone.utc)})
-                conn.commit()
-        except Exception as e:
-            logger.warning(f"[FactCheck] Cache write failed: {e}")
-
-        return results
-
-    except Exception as e:
-        logger.warning(f"[FactCheck] API call failed: {e}")
-        return []
 

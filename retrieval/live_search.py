@@ -1,42 +1,5 @@
 """
-retrieval/live_search.py — Live Evidence Retrieval v3.3
-Social Proof v3.4
-
-v3.1 Changes:
-  - Domain reputation scores applied: results below REPUTATION_THRESHOLD filtered.
-  - Numeric/statistical query detection → boosts Tier 1 and Tier 2 sources.
-  - Expanded fact-check query patterns.
-  - 30–60 min TTL query result cache.
-  - Live search results merged and ranked using the hybrid formula.
-
-v3.2 Changes:
-  - Removed all local duplicates of shared helpers. The following are now
-    imported from retrieval/utils.py:
-      recency_boost, trust_normalised, hybrid_score,
-      is_numeric_query, split_sentences
-  - W_SEMANTIC / W_TRUST / W_RECENCY are defined once in utils.py.
-  - The embedding model is passed in from the API (api/main.py passes
-    retriever.model), so no second model instance is loaded.
-
-v3.3 Bug Fixes (BUG 8):
-  - _parse_html_to_sentences(): expanded container selector chain to include
-    div.field-item, div.press-release, section.content and other gov-site
-    structures used by PSA, BSP, NEDA, DOH. Deep fallback to all <p> tags
-    when container detection yields < 100 chars.
-  - _fetch_with_requests(): User-Agent now rotated per request from a pool
-    of 4 real browser UAs. .gov.ph domains get verify=False to tolerate
-    common SSL cert issues on Philippine government servers.
-
-ROOT BUG FIX (v2.1, kept):
-  Google News RSS returns redirect URLs like news.google.com/rss/articles/...
-  We extract source_domain from <source url="..."> and use THAT for domain checks.
-
-FALLBACK CHAIN (v2.2, kept):
-  1. requests  — fast plain HTTP
-  2. Playwright — headless Chromium (bypasses Cloudflare / JS walls)
-  3. ScraperAPI — paid rotating proxy (last resort, 1000 free credits/month)
-  4. RSS description — always available, shortest content
-
+retrieval/live_search.py
 SETUP:
   pip install playwright scraperapi-sdk
   playwright install chromium
@@ -70,8 +33,39 @@ GOOGLE_FACTCHECK_API_KEY: str = os.getenv("GOOGLE_FACTCHECK_API_KEY", "")
 
 try:
     from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
+    _PLAYWRIGHT_IMPORTED = True
 except ImportError:
+    _PLAYWRIGHT_IMPORTED = False
+
+# Circuit breaker: set True once any call raises NotImplementedError or
+# the startup probe fails. All subsequent calls skip immediately.
+_playwright_broken = False
+
+
+def _probe_playwright() -> bool:
+    """
+    Launch and immediately close a headless Chromium instance at startup.
+    Returns False if the environment can't spawn subprocesses (e.g. Windows/
+    Python 3.11 ThreadPoolExecutor threads where ProactorEventLoop blocks
+    asyncio.create_subprocess_exec). Failing fast here avoids burning the
+    entire live-search timeout on repeated NotImplementedError raises.
+    """
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
+if _PLAYWRIGHT_IMPORTED:
+    PLAYWRIGHT_AVAILABLE = _probe_playwright()
+    if not PLAYWRIGHT_AVAILABLE:
+        print("[LiveSearch] Playwright: startup probe failed — "
+              "browser scraping disabled for this session. "
+              "RSS + requests fallbacks will be used instead.")
+else:
     PLAYWRIGHT_AVAILABLE = False
 
 # ── Source registry imports ───────────────────────────────────────────────────
@@ -143,6 +137,30 @@ _NICHE_QUERY_RE = re.compile(
     r"travel|tourism|itinerary|airbnb|"
     r"nba|pba|mlb|nhl|nfl|fifa|ufc|boxing|wrestling"
     r")\b",
+    re.I,
+)
+
+# Module-level event keyword regex — used for smart lowercase normalization
+# in _extract_query_terms() so action words are never capitalized into fake names.
+# Intentionally broad (stem-based): covers base forms + common inflections
+# without hardcoding exhaustive verb lists.
+_EVENT_KW_RE_GLOBAL = re.compile(
+    r"\b(shoot\w*|kill\w*|wound\w*|injur\w*|dead|death|die\w*|died|"
+    r"casualt\w*|disappear\w*|missing|murder\w*|assassin\w*|"
+    r"arrest\w*|detain\w*|warrant\w*|jail\w*|imprison\w*|charg\w*|indict\w*|releas\w*|"
+    r"convict\w*|acquit\w*|sentenc\w*|verdict\w*|"
+    r"impeach\w*|resign\w*|appoint\w*|elect\w*|vote\w*|"
+    r"raid\w*|ambush\w*|attack\w*|clash\w*|riot\w*|bomb\w*|"
+    r"protest\w*|rally|rallied|rallies|crackdown|dispers\w*|"
+    r"surrender\w*|escap\w*|fle[ed]|flee\w*|"
+    r"testif\w*|hear\w*|appear\w*|"
+    r"order\w*|issu\w*|command\w*|direct\w*|declar\w*|announc\w*|"
+    r"found|ruled|said|denied|confirm\w*|reveal\w*|"
+    r"disinfect\w*|spread\w*|transmit\w*|infect\w*|contaminat\w*|"
+    r"reclassif\w*|classif\w*|redefin\w*|reclassif\w*|"
+    r"ban\w*|remov\w*|block\w*|censor\w*|"
+    r"standoff|lockdown|manhunt|siege|hostage|"
+    r"fired|sacked|suspend\w*|dismiss\w*)\b",
     re.I,
 )
 
@@ -384,6 +402,28 @@ def _passes_reputation(item: Dict) -> bool:
 # ── Query extraction ──────────────────────────────────────────────────────────
 
 def _extract_query_terms(claim: str, max_terms: int = 10) -> str:
+    # Normalize: if claim is all-lowercase, recover proper nouns smartly.
+    # Run _EVENT_KW_RE on the raw claim first, then capitalize only tokens
+    # that are NOT event keywords and NOT grammar words — so "arrested" stays
+    # lowercase (becoming an event keyword) while "bato dela rosa" gets
+    # capitalized (becoming a name). No hardcoded verb lists needed.
+    if claim == claim.lower():
+        _event_tokens = {m.lower() for m in _EVENT_KW_RE_GLOBAL.findall(claim)}
+        _grammar = {
+            "the", "a", "an", "is", "are", "was", "were", "in", "of", "to",
+            "for", "that", "this", "and", "or", "but", "on", "at", "by",
+            "from", "with", "has", "have", "had", "be", "been", "being",
+            "will", "would", "could", "should", "may", "might", "do", "does",
+            "did", "its", "it", "who", "what", "when", "where", "how",
+            "said", "also", "than", "then", "not", "no", "as", "up", "so",
+            "if", "can", "all", "more", "some", "very", "just", "only",
+        }
+        claim = " ".join(
+            w if (w in _event_tokens or w in _grammar) else w.capitalize()
+            for w in claim.split()
+        )
+    claim = re.sub(r'[""«»\']', '', claim)
+
     stopwords = {
         "the", "a", "an", "is", "are", "was", "were", "in", "of", "to",
         "for", "that", "this", "and", "or", "but", "on", "at", "by", "from",
@@ -393,19 +433,103 @@ def _extract_query_terms(claim: str, max_terms: int = 10) -> str:
         "also", "than", "then", "their", "they", "them", "these", "those",
         "not", "no", "as", "up", "about", "into", "through", "during",
         "only", "just", "very", "so", "if", "can", "all", "more", "some",
+        "philippines", "philippine", "senator", "president", "government",
     }
-    tokens = re.findall(r'[\d]+(?:[.,]\d+)?%?|[A-Za-z]+', claim)
-    priority, secondary = [], []
-    for tok in tokens:
-        lower = tok.lower()
-        if lower in stopwords or len(tok) < 3:
-            continue
-        if re.match(r'^\d', tok) or tok[0].isupper():
-            priority.append(tok)
+
+    # Name-part connectors (PH, Spanish, Arabic, Dutch, etc.)
+    _CONNECTORS = {"de", "la", "del", "dela", "delos", "los", "las",
+                   "bin", "ibn", "van", "von", "el", "al", "ng"}
+    _LEADING_ARTICLES = {"The", "A", "An", "Its", "This", "That"}
+
+    def _is_title(tok): return bool(re.match(r'^[A-Z][a-z]{1,}$', tok))
+    def _is_upper(tok): return bool(re.match(r'^[A-Z]{2,6}$', tok))
+
+    # Tokenise and strip punctuation
+    raw_tokens = [re.sub(r'[^\w]', '', t) for t in re.findall(r'\b\S+\b', claim)]
+    raw_tokens = [t for t in raw_tokens if t]
+
+    # Walk tokens and stitch consecutive Title Case words, joining across
+    # lowercase connectors (e.g. "Bato dela Rosa", "Juan de la Cruz").
+    # ALLCAPS abbreviations (ICC, BSP) start their own phrase and are NOT
+    # merged into a preceding name — they're separate entities.
+    phrases = []
+    i = 0
+    while i < len(raw_tokens):
+        tok = raw_tokens[i]
+        if _is_title(tok) or _is_upper(tok):
+            phrase_tokens = [tok]
+            j = i + 1
+            while j < len(raw_tokens):
+                next_tok = raw_tokens[j]
+                if next_tok.lower() in _CONNECTORS and j + 1 < len(raw_tokens):
+                    after = raw_tokens[j + 1]
+                    if _is_title(after):   # only Title Case after connector, not ALLCAPS
+                        phrase_tokens.append(next_tok)
+                        phrase_tokens.append(after)
+                        j += 2
+                        continue
+                if _is_title(next_tok):    # consecutive Title Case words
+                    phrase_tokens.append(next_tok)
+                    j += 1
+                    continue
+                break
+            phrases.append(" ".join(phrase_tokens))
+            i = j
         else:
-            secondary.append(tok)
-    combined = (priority + secondary)[:max_terms]
-    return " ".join(combined) if combined else claim[:80]
+            i += 1
+
+    entity_quoted = []
+    seen_phrases  = set()
+    for phrase in phrases:
+        for art in _LEADING_ARTICLES:
+            if phrase.startswith(art + " "):
+                phrase = phrase[len(art) + 1:]
+                break
+        words = phrase.split()
+        lower = phrase.lower()
+        if lower in seen_phrases:
+            continue
+        if len(words) == 1 and phrase.lower() in stopwords:
+            continue
+        if len(words) >= 2:
+            entity_quoted.append(f'"{phrase}"')
+        elif _is_upper(phrase):
+            entity_quoted.append(phrase)
+        elif phrase.lower() not in stopwords and len(phrase) >= 3:
+            entity_quoted.append(phrase)
+        seen_phrases.add(lower)
+
+    _EVENT_KW_RE = re.compile(
+        r'\b(gunfire|shooting|shot|standoff|lockdown|'
+        r'arrest|arrested|arrests|warrant|warrants|'
+        r'detained|detention|charged|charges|indicted|jailed|imprisoned|released|'
+        r'raid|siege|manhunt|hearing|testimony|'
+        r'surrender|surrendered|escape|escaped|fled|flee|'
+        r'impeach|impeached|resign|resigned|convict|convicted|acquit|acquitted|'
+        r'drug.?war|crackdown|killed|wounded|'
+        r'hostage|barricade|confrontation|protest|clash|riot|bombing|attack|attacked)\b',
+        re.I,
+    )
+    event_kws = list(dict.fromkeys(m.lower() for m in _EVENT_KW_RE.findall(claim)))
+
+    combined_parts = entity_quoted[:6] + event_kws[:4]
+    query = " ".join(combined_parts[:max_terms])
+
+    if not query.strip():
+        tokens = re.findall(r'[\d]+(?:[.,]\d+)?%?|[A-Za-z]+', claim)
+        priority, secondary = [], []
+        for tok in tokens:
+            lower = tok.lower()
+            if lower in stopwords or len(tok) < 3:
+                continue
+            if re.match(r'^\d', tok) or tok[0].isupper():
+                priority.append(tok)
+            else:
+                secondary.append(tok)
+        combined = (priority + secondary)[:max_terms]
+        query = " ".join(combined) if combined else claim[:80]
+
+    return query
 
 
 # ── Google News URL resolver ──────────────────────────────────────────────────
@@ -487,7 +611,8 @@ def _fetch_with_requests(url: str, domain: str) -> Optional[List[Dict]]:
 
 
 def _fetch_with_playwright(url: str, domain: str) -> Optional[List[Dict]]:
-    if not PLAYWRIGHT_AVAILABLE:
+    global _playwright_broken
+    if not PLAYWRIGHT_AVAILABLE or _playwright_broken:
         return None
     try:
         # Resolve Google News redirect URL before handing to Playwright.
@@ -511,6 +636,15 @@ def _fetch_with_playwright(url: str, domain: str) -> Optional[List[Dict]]:
             return None
         sentences = _parse_html_to_sentences(html, domain, final_url, "live_playwright")
         return sentences if sentences else None
+    except NotImplementedError:
+        # asyncio.create_subprocess_exec is blocked in this environment
+        # (e.g. Windows Python 3.11 ProactorEventLoop inside a ThreadPoolExecutor).
+        # Permanently disable Playwright so every subsequent call skips instantly
+        # rather than burning the live-search timeout on guaranteed failures.
+        _playwright_broken = True
+        print("  [LiveSearch] Playwright: permanently disabled "
+              "(subprocess spawn not supported in this environment)")
+        return None
     except Exception as e:
         print(f"  [LiveSearch] Playwright: failed → {domain} ({type(e).__name__})")
         return None
@@ -781,9 +915,96 @@ def live_search(claim: str, model, k: int = LIVE_TOP_K) -> List[Dict]:
     """
     import numpy as np
 
+    # Normalize claim casing: if the whole claim is lowercase, capitalize only
+    # tokens that are NOT event keywords (e.g. "arrested", "killed") — those
+    # stay lowercase so they become event anchors, not fake proper nouns.
+    # Uses _EVENT_KW_RE_GLOBAL (stem-based, no hardcoded verb lists).
+    if claim == claim.lower():
+        _ev_toks = {m.lower() for m in _EVENT_KW_RE_GLOBAL.findall(claim)}
+        _grammar = {
+            "the", "a", "an", "is", "are", "was", "were", "in", "of", "to",
+            "for", "that", "this", "and", "or", "but", "on", "at", "by",
+            "from", "with", "has", "have", "had", "be", "been", "being",
+            "will", "would", "could", "should", "may", "might", "do", "does",
+            "did", "its", "it", "who", "what", "when", "where", "how",
+            "said", "also", "than", "then", "not", "no", "as", "up", "so",
+            "if", "can", "all", "more", "some", "very", "just", "only",
+        }
+        claim = " ".join(
+            w if (w in _ev_toks or w in _grammar) else w.capitalize()
+            for w in claim.split()
+        )
+
     query       = _extract_query_terms(claim)
     numeric_q   = is_numeric_query(claim)   # from utils
     niche_q     = _is_niche_query(claim)    # NEW: niche/entertainment detection
+
+    # ── Settled-fact / historical early exit ─────────────────────────────────
+    # Detects claims that are structurally settled facts (historical events,
+    # scientific truths, biographical facts) rather than breaking news.
+    # Live search on these returns weakly-related noise, so we exit early
+    # and let FAISS handle it.
+    #
+    # Fully dynamic — no hardcoded names or lists. Uses:
+    #   - Structural signals: claim length, stative/past-action verbs
+    #   - Science signals: physical/chemical domain words
+    #   - News signals: present-tense breaking-news verbs (negates settled)
+    #   - Year signals: future year = not settled; recent year = news
+    #   - Current-status signal: "X is the president/senator/..." = checkable
+
+    _SF_STATIVE = re.compile(
+        r"\b(is|are|was|were|has been|have been|remains?|became?)\b", re.I
+    )
+    _SF_PAST_ACTION = re.compile(
+        r"\b(died|executed|exiled|born|founded|signed|ended|abolished|"
+        r"discovered|invented|declared|proclaimed|ratified|enacted|"
+        r"reclassif\w*|classif\w*|redefin\w*|declass\w*)\b",
+        re.I,
+    )
+    _SF_NEWS_SIGNAL = re.compile(
+        r"\b(arrested|impeached|charged|convicted|sentenced|raided|"
+        r"ordered|shooting|killed\s+by|according|says|said|claims|"
+        r"announced|reported)\b",
+        re.I,
+    )
+    _SF_SCIENCE = re.compile(
+        r"\b(boils?|freezes?|melts?|degrees?|celsius|fahrenheit|"
+        r"km|miles?|meters?|gravity|speed\s+of\s+light|atoms?|"
+        r"molecules?|cells?|dna|orbit\w*|element\w*|compound\w*|chemical\w*)\b",
+        re.I,
+    )
+    _SF_FUTURE_YEAR  = re.compile(r"\b(202[6-9]|20[3-9]\d|2[1-9]\d{2})\b")
+    _SF_RECENT_YEAR  = re.compile(r"\b(202[0-5])\b")
+    _SF_CURR_STATUS  = re.compile(
+        r"\b(is|are)\s+(the\s+)?(president|senator|mayor|governor|chief|"
+        r"secretary|minister|chairman|ceo|head|leader|director)\b",
+        re.I,
+    )
+
+    _sf_words       = claim.split()
+    _sf_short       = len(_sf_words) <= 8
+    _sf_stative     = bool(_SF_STATIVE.search(claim))
+    _sf_past        = bool(_SF_PAST_ACTION.search(claim))
+    _sf_news        = bool(_SF_NEWS_SIGNAL.search(claim))
+    _sf_science     = bool(_SF_SCIENCE.search(claim))
+    _sf_future_yr   = bool(_SF_FUTURE_YEAR.search(claim))
+    _sf_recent_yr   = bool(_SF_RECENT_YEAR.search(claim))
+    _sf_curr_status = bool(_SF_CURR_STATUS.search(claim))
+
+    _is_settled = False
+    if not _sf_future_yr and not _sf_curr_status:
+        if _sf_recent_yr and not _sf_past:
+            _is_settled = False       # recent year + no historical action = news
+        elif _sf_short and _sf_science:
+            _is_settled = True        # science facts
+        elif _sf_short and (_sf_stative or _sf_past) and not _sf_news:
+            _is_settled = True        # biographical / historical
+
+    if _is_settled:
+        logger.info("[LiveSearch] Settled-fact claim detected — skipping live search.")
+        return []
+    # ─────────────────────────────────────────────────────────────────────────
+
     cache_key_q = f"{query}|{numeric_q}|{niche_q}"
 
     cached = _cache_get(cache_key_q)
@@ -972,16 +1193,83 @@ def live_search(claim: str, model, k: int = LIVE_TOP_K) -> List[Dict]:
     # niche_results and open_results are mutually exclusive (only one runs
     # per query based on niche_q flag), so summing them is safe.
     all_results = fact_results + stats_results + trusted_results + open_results + niche_results
-    all_results.sort(key=lambda x: x["similarity"], reverse=True)
+
+    # ── Entity identity scoring (v3.4) ────────────────────────────────────────
+    # Apply after all pipelines merge so entity scoring sees the full candidate
+    # pool. This separates "same event" from "same topic" — e.g. "Duterte ICC"
+    # articles are penalised when the claim is about "Bato dela Rosa ICC"
+    # because "Bato" / "dela Rosa" are absent from their text/title.
+    #
+    # Skipped for:
+    #   - numeric/stats claims — entity filtering is less meaningful for data
+    #   - precise named-entity queries — RSS was already searched with quoted
+    #     entity terms (e.g. '"Ronald Bato Dela Rosa" shooting'), so results
+    #     are already entity-targeted. Applying entity scoring on top would
+    #     discard on-topic articles that mention the person in a slightly
+    #     different context, reducing recall with no benefit.
+    #
+    # apply_entity_rerank() mutates dicts in-place (adds entity_score,
+    # context_label, adjusts similarity) and re-sorts by adjusted similarity.
+    _query_is_precise = '"' in query  # quoted terms → already entity-filtered by RSS
+    _skip_entity_scoring = numeric_q or _query_is_precise
+
+    if not _skip_entity_scoring:
+        try:
+            from retrieval.utils import apply_entity_rerank
+            all_results = apply_entity_rerank(all_results, claim)
+            print(
+                f"  [LiveSearch] Entity identity scoring applied. "
+                f"Labels: { {r.get('context_label', '?') for r in all_results[:5]} }"
+            )
+        except Exception as _e:
+            print(f"  [LiveSearch] Entity scoring skipped: {_e}")
+            all_results.sort(key=lambda x: x["similarity"], reverse=True)
+    else:
+        reason = "numeric query" if numeric_q else "precise named-entity query (RSS already filtered)"
+        print(f"  [LiveSearch] Entity identity scoring skipped ({reason}).")
+        all_results.sort(key=lambda x: x["similarity"], reverse=True)
+        # Assign neutral labels so the merge logic below keeps everything
+        for r in all_results:
+            r.setdefault("context_label", "same_event")
+            r.setdefault("entity_score", 0.0)
 
     seen, final = set(), []
+    related_fallback = []
+    broad_fallback   = []
+
     for r in all_results:
         short = r["text"][:80]
-        if short not in seen:
-            seen.add(short)
-            final.append(r)
+        if short in seen:
+            continue
+        seen.add(short)
+
+        label = r.get("context_label", "")
+        if label == "broad_match":
+            broad_fallback.append(r)
+            continue
+        if label == "related_topic":
+            related_fallback.append(r)
+            continue
+
+        final.append(r)
         if len(final) >= k:
             break
+
+    # Pad with related_topic only when same_event results are scarce.
+    # Always padding (teammate's version) leaks irrelevant-but-thematically-
+    # similar results back in once we have enough on-target hits.
+    if len(final) < max(2, k // 2):
+        for r in related_fallback:
+            if len(final) >= k:
+                break
+            final.append(r)
+
+    # Last resort: broad_match only when almost nothing else found
+    if len(final) < 2:
+        for r in broad_fallback:
+            if len(final) >= k:
+                break
+            final.append(r)
 
     summary = (
         f"{len(final)} total "

@@ -27,13 +27,14 @@ from email.mime.text import MIMEText
 import smtplib
 
 import sqlalchemy as sa
-from fastapi import APIRouter, HTTPException, Header, Request, Response
+from fastapi import APIRouter, HTTPException, Header, Request, Response, Depends, Query
 
 from sqlalchemy.orm import Session
 
-from config import SECRET_KEY, JWT_ALGORITHM, JWT_EXPIRE_DAYS, logger
-from database.models import engine, UserORM, PasswordResetTokenORM, EmailVerificationTokenORM
-from schemas import RegisterRequest, LoginRequest, AuthResponse, ForgotPasswordRequest, ResetPasswordRequest, VerifyEmailRequest
+from config import SECRET_KEY, JWT_ALGORITHM, JWT_EXPIRE_DAYS, logger, \
+    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM, APP_BASE_URL
+from database.models import engine, UserORM, PasswordResetTokenORM, EmailVerificationTokenORM, ResearchConsentLogORM
+from schemas import RegisterRequest, LoginRequest, AuthResponse, ForgotPasswordRequest, ResetPasswordRequest, VerifyEmailRequest, ConsentWithdrawRequest, ConsentStatusResponse
 
 router = APIRouter(prefix="/auth")
 
@@ -91,12 +92,7 @@ if _worker_count > 1 and not _redis:
     )
 
 # ── Email config (SMTP) ───────────────────────────────────────────────────────
-_SMTP_HOST     = os.getenv("SMTP_HOST", "")
-_SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
-_SMTP_USER     = os.getenv("SMTP_USER", "")
-_SMTP_PASS     = os.getenv("SMTP_PASS", "")
-_SMTP_FROM     = os.getenv("SMTP_FROM", _SMTP_USER)
-_APP_BASE_URL  = os.getenv("APP_BASE_URL", "http://localhost:8000")
+# Values imported from config — set SMTP_HOST/SMTP_USER/SMTP_PASS/APP_BASE_URL in .env
 
 _RESET_TOKEN_EXPIRE_MINUTES  = 60    # 1 hour
 _VERIFY_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
@@ -104,19 +100,19 @@ _VERIFY_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 
 def _send_email(to: str, subject: str, body: str) -> bool:
     """Send a plain-text email. Returns True on success, False on failure."""
-    if not _SMTP_HOST or not _SMTP_USER:
+    if not SMTP_HOST or not SMTP_USER:
         logger.warning(f"[Email] SMTP not configured — skipping send to {to}. Set SMTP_HOST/SMTP_USER/SMTP_PASS in .env")
         return False
     try:
         msg = MIMEText(body, "plain")
         msg["Subject"] = subject
-        msg["From"]    = _SMTP_FROM
+        msg["From"]    = SMTP_FROM
         msg["To"]      = to
-        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=10) as smtp:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
             smtp.ehlo()
             smtp.starttls()
-            smtp.login(_SMTP_USER, _SMTP_PASS)
-            smtp.sendmail(_SMTP_FROM, [to], msg.as_string())
+            smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.sendmail(SMTP_FROM, [to], msg.as_string())
         return True
     except Exception as e:
         logger.error(f"[Email] Failed to send to {to}: {e}")
@@ -308,7 +304,7 @@ async def forgot_password(req: ForgotPasswordRequest):
         ))
         db.commit()
 
-        reset_link = f"{_APP_BASE_URL}/reset-password.html?token={raw_token}"
+        reset_link = f"{APP_BASE_URL}/reset-password.html?token={raw_token}"
         body = (
             f"You requested a password reset for your SocialProof account.\n\n"
             f"Click the link below to set a new password. This link expires in "
@@ -393,7 +389,7 @@ async def send_verification(request: Request, authorization: str = Header(None))
         ))
         db.commit()
 
-        verify_link = f"{_APP_BASE_URL}/verify-email.html?token={raw_token}"
+        verify_link = f"{APP_BASE_URL}/verify-email.html?token={raw_token}"
         body = (
             f"Welcome to SocialProof! Please verify your email address.\n\n"
             f"{verify_link}\n\n"
@@ -440,9 +436,26 @@ async def verify_email(req: VerifyEmailRequest):
     return {"ok": True}
 
 
+# ── Check username availability ───────────────────────────────────────────────
+@router.get("/check-username")
+async def check_username(u: str = Query(..., min_length=3, max_length=50)):
+    """Returns {"available": bool} — used by the registration form for real-time feedback."""
+    with Session(engine) as db:
+        exists = db.query(UserORM).filter(UserORM.username == u).first() is not None
+    return {"available": not exists}
+
+
 # ── Register ──────────────────────────────────────────────────────────────────
 @router.post("/register", response_model=AuthResponse, status_code=201)
-async def register(req: RegisterRequest):
+async def register(req: RegisterRequest, request: Request):
+    # Schema validator already rejects research_consent=False, but we
+    # double-check here so the DB invariant is always enforced.
+    if not req.research_consent:
+        raise HTTPException(
+            status_code=422,
+            detail="Research participation consent is required to create an account.",
+        )
+
     db = Session(engine)
     try:
         exists = db.execute(
@@ -452,18 +465,34 @@ async def register(req: RegisterRequest):
         if exists:
             raise HTTPException(status_code=409, detail="Email or username already taken.")
 
+        now = datetime.now(timezone.utc)
         user = UserORM(
-            username=req.username,
-            email=req.email,
-            password_hash=_hash_pw(req.password),
-            role="user",
+            username             = req.username,
+            email                = req.email,
+            password_hash        = _hash_pw(req.password),
+            role                 = "user",
+            research_consent     = 1,
+            research_consent_at  = now,
+            consent_withdrawn_at = None,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
 
+        # ── Audit log: record consent grant ──────────────────────────────────
+        ip         = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent", "")[:500]
+        db.add(ResearchConsentLogORM(
+            user_id    = user.id,
+            action     = "granted",
+            ip_address = ip,
+            user_agent = user_agent,
+            acted_at   = now,
+        ))
+        db.commit()
+
         token = _sign(_make_payload(user.id, user.username, user.role))
-        logger.info(f"New user registered: {user.username} (id={user.id})")
+        logger.info(f"New user registered: {user.username} (id={user.id}), research_consent=True")
 
         # Send email verification token
         raw_token  = secrets.token_urlsafe(32)
@@ -476,7 +505,7 @@ async def register(req: RegisterRequest):
             used       = 0,
         ))
         db.commit()
-        verify_link = f"{_APP_BASE_URL}/verify-email.html?token={raw_token}"
+        verify_link = f"{APP_BASE_URL}/verify-email.html?token={raw_token}"
         body = (
             f"Welcome to SocialProof, {user.username}!\n\n"
             f"Please verify your email address:\n{verify_link}\n\n"
@@ -485,6 +514,98 @@ async def register(req: RegisterRequest):
         _send_email(user.email, "Verify your SocialProof email", body)
 
         return AuthResponse(token=token, user_id=user.id, username=user.username, role=user.role)
+    finally:
+        db.close()
+
+
+# ── GET /auth/consent-status ──────────────────────────────────────────────────
+@router.get("/consent-status", response_model=ConsentStatusResponse)
+async def consent_status(authorization: str = Header(None)):
+    """
+    Returns the current research consent status for the authenticated user.
+    consent_withdrawn_at=null means consent is still active.
+    """
+    payload = _verify(authorization)
+    user_id = payload.get("sub") or payload.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+
+    db = Session(engine)
+    try:
+        row = db.execute(
+            sa.text("SELECT research_consent, research_consent_at, consent_withdrawn_at FROM users WHERE id = :uid"),
+            {"uid": user_id},
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        return ConsentStatusResponse(
+            user_id              = user_id,
+            research_consent     = bool(row.research_consent),
+            research_consent_at  = row.research_consent_at.isoformat() if row.research_consent_at else None,
+            consent_withdrawn_at = row.consent_withdrawn_at.isoformat() if row.consent_withdrawn_at else None,
+        )
+    finally:
+        db.close()
+
+
+# ── POST /auth/withdraw-consent ───────────────────────────────────────────────
+@router.post("/withdraw-consent")
+async def withdraw_consent(req: ConsentWithdrawRequest, request: Request, authorization: str = Header(None)):
+    """
+    Allows an authenticated user to withdraw their research participation consent
+    at any time, as required by informed consent principles.
+
+    Effect:
+      - Sets users.consent_withdrawn_at to the current UTC timestamp.
+      - Appends an audit row to research_consent_log with action='withdrawn'.
+      - Does NOT delete the user's account or any existing data.
+      - Research queries MUST filter WHERE consent_withdrawn_at IS NULL — this
+        ensures the user's future data is excluded from research analysis.
+
+    The user can re-grant consent by contacting the research team (or via a
+    future re-consent flow). This endpoint is one-way by design.
+    """
+    payload = _verify(authorization)
+    token_user_id = payload.get("sub") or payload.get("user_id")
+    if not token_user_id or int(token_user_id) != req.user_id:
+        raise HTTPException(status_code=403, detail="You can only withdraw your own consent.")
+
+    db = Session(engine)
+    try:
+        row = db.execute(
+            sa.text("SELECT id, consent_withdrawn_at FROM users WHERE id = :uid"),
+            {"uid": req.user_id},
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        if row.consent_withdrawn_at is not None:
+            raise HTTPException(status_code=409, detail="Consent has already been withdrawn.")
+
+        now        = datetime.now(timezone.utc)
+        ip         = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent", "")[:500]
+
+        db.execute(
+            sa.text("UPDATE users SET consent_withdrawn_at = :now WHERE id = :uid"),
+            {"now": now, "uid": req.user_id},
+        )
+        db.add(ResearchConsentLogORM(
+            user_id    = req.user_id,
+            action     = "withdrawn",
+            ip_address = ip,
+            user_agent = user_agent,
+            acted_at   = now,
+        ))
+        db.commit()
+        logger.info(f"[Consent] User {req.user_id} withdrew research consent at {now}.")
+        return {
+            "ok":      True,
+            "message": (
+                "Your research participation consent has been withdrawn. "
+                "Your data will no longer be included in research analysis going forward. "
+                "Your account and prior submissions remain unchanged."
+            ),
+        }
     finally:
         db.close()
 
@@ -616,3 +737,75 @@ async def logout(request: Request, authorization: str = Header(None)):
 async def get_session_token():
     """Generate a cryptographically secure anonymous session token. Stateless."""
     return {"session_token": secrets.token_hex(32)}
+
+# ── POST /auth/merge-session ──────────────────────────────────────────────────
+# Checklist ms3: Fix anonymous → authenticated session merge.
+# When users create an account after anonymous sessions, we migrate all
+# rows with user_id = NULL and session_token = <old_token> to user_id = <uid>.
+# Tables covered: submissions, user_reflections, confidence_snapshots,
+#   source_diversity_log, user_skill_progress, user_skill_history,
+#   lesson_completions, pretest_results, user_behavior_profile, quiz_attempts.
+@router.post("/merge-session")
+async def merge_session(body: dict, current_user=Depends(get_current_user)):
+    """
+    Merge anonymous session data into the authenticated user account.
+    Must be called immediately after login/register for users who had
+    a prior anonymous session. Idempotent — safe to call multiple times.
+    """
+    session_token = (body.get("session_token") or "").strip()
+    if not session_token:
+        raise HTTPException(status_code=422, detail="session_token is required.")
+
+    user_id = current_user["id"]
+
+    _MERGE_TABLES = [
+        # (table, user_id_col, session_col)
+        ("submissions",            "user_id",  "session_token"),
+        ("user_reflections",       "user_id",  "session_token"),
+        ("confidence_snapshots",   "user_id",  "session_token"),
+        ("source_diversity_log",   None,       "session_token"),   # no user_id col — join via submission
+        ("user_skill_progress",    "user_id",  "session_token"),
+        ("user_skill_history",     "user_id",  "session_token"),
+        ("lesson_completions",     "user_id",  "session_token"),
+        ("pretest_results",        "user_id",  "session_token"),
+        ("user_behavior_profile",  "user_id",  "session_token"),
+    ]
+
+    merged = {}
+    try:
+        with engine.begin() as conn:
+            for table, uid_col, sess_col in _MERGE_TABLES:
+                if uid_col is None:
+                    continue  # handled separately
+                try:
+                    result = conn.execute(sa.text(f"""
+                        UPDATE {table}
+                        SET {uid_col} = :uid
+                        WHERE {uid_col} IS NULL
+                          AND {sess_col} = :tok
+                    """), {"uid": user_id, "tok": session_token})
+                    merged[table] = result.rowcount
+                except Exception as te:
+                    logger.warning(f"[merge-session] {table} update failed: {te}")
+                    merged[table] = 0
+
+            # source_diversity_log: update via submission join
+            try:
+                result = conn.execute(sa.text("""
+                    UPDATE source_diversity_log sdl
+                    INNER JOIN submissions s ON s.id = sdl.submission_id
+                    SET s.user_id = :uid
+                    WHERE sdl.session_token = :tok
+                      AND s.user_id IS NULL
+                """), {"uid": user_id, "tok": session_token})
+                merged["source_diversity_log"] = result.rowcount
+            except Exception as te:
+                logger.warning(f"[merge-session] source_diversity_log update failed: {te}")
+                merged["source_diversity_log"] = 0
+
+        logger.info(f"[merge-session] user={user_id} session={session_token[:8]}… merged={merged}")
+        return {"status": "ok", "user_id": user_id, "merged_rows": merged}
+
+    except Exception as e:
+        logger.error(f"[merge-session] error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Session merge failed.")

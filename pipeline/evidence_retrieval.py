@@ -1,14 +1,15 @@
 """
 SocialProof — Module 5: Evidence Retrieval
-v3.1 — FAISS primary + live search fallback
+v4.0 — Live search primary + FAISS fallback
        + hardcoded corpus emergency fallback
 
 Retrieval priority:
-  1. FAISS retriever (BGE-M3, built corpus)
-     → if evidence_coverage == 0, escalate to live search
-  2. Live search (Google News RSS + Google Fact Check API)
-     → only fires when FAISS finds nothing for ALL claims
-  3. Hardcoded corpus (~40 entries, always available, no setup required)
+  1. Live search (Google News RSS + Google Fact Check API)
+     → always tried first for fresh, query-specific results
+  2. FAISS retriever (BGE-M3, built corpus)
+     → fallback when live search returns nothing (timeout, obscure query,
+       future event, rate limit)
+  3. Hardcoded corpus (~10 entries, always available, no setup required)
      → emergency fallback when FAISS index files are missing entirely
 
 """
@@ -31,12 +32,6 @@ from corpus.source_registry import get_publisher_name
 # so being strict here left many topics with zero results.
 SIM_THRESHOLD = 0.07
 
-# Minimum check-worthiness score for a claim to be flagged as check-worthy.
-# Used in score_claim_worthiness() return value only — does NOT gate retrieval
-# (gate was removed in v4.0 MIL). The lowest non-zero score from the heuristic
-# is 0.10 (one weak signal). A claim needs at least two weak signals (~0.20)
-# to be considered worth flagging. Defined here to avoid NameError on line 116.
-CHECK_WORTHY_THRESHOLD = 0.20
 
 # ── Unverified-claim tracking (corpus gap analysis) ──────────────────────────
 # Capped at 500 unique claims to prevent unbounded memory growth in long-running servers.
@@ -67,68 +62,6 @@ def get_unverified_log() -> List[Dict]:
         key=lambda x: x["count"],
         reverse=True,
     )
-
-
-# ── Check-worthiness heuristic ──────────────────────────────────────────────────
-
-def score_claim_worthiness(claim_text: str) -> Dict:
-    """
-    Local check-worthiness heuristic.
-
-    Signals based on Hassan et al. (2017) — KDD check-worthiness research:
-      - Attributed assertion (has a named source/speaker)    +0.25
-      - Specific statistic with unit                         +0.25
-      - Superlative or absolute word                         +0.15
-      - Causal language                                      +0.15
-      - Specific number (year or decimal)                    +0.10
-      - Appropriate length (6–80 words)                      +0.10
-      - Penalty: too short or too long                       -0.20
-    """
-    # Local heuristic (always used when API unavailable or key not set)
-    _ATTRIBUTED_RE   = re.compile(
-        r"\b(according to|said|announced|reported|confirmed|stated|claimed|"
-        r"showed?|found|revealed|declared|warned)\b", re.I
-    )
-    _STATISTIC_RE    = re.compile(
-        r"\b\d[\d,.]*\s*(%|percent|million|billion|trillion|thousand)\b", re.I
-    )
-    _SUPERLATIVE_RE  = re.compile(
-        r"\b(first|last|only|never|always|highest|lowest|largest|smallest|"
-        r"most|least|best|worst|all|none|every)\b", re.I
-    )
-    _CAUSAL_RE       = re.compile(
-        r"\b(cause[sd]?|led to|resulted in|linked to|associated with|"
-        r"responsible for|due to|leads to)\b", re.I
-    )
-    _SPECIFIC_NUM_RE = re.compile(r"\b\d{4}\b|\b\d+\.\d+\b")
-
-    text    = claim_text.strip()
-    words   = text.split()
-    score   = 0.0
-    signals = []
-
-    if _ATTRIBUTED_RE.search(text):
-        score += 0.25; signals.append("attributed_assertion")
-    if _STATISTIC_RE.search(text):
-        score += 0.25; signals.append("statistic_with_unit")
-    if _SUPERLATIVE_RE.search(text):
-        score += 0.15; signals.append("superlative_absolute")
-    if _CAUSAL_RE.search(text):
-        score += 0.15; signals.append("causal_language")
-    if _SPECIFIC_NUM_RE.search(text):
-        score += 0.10; signals.append("specific_number")
-    if 6 <= len(words) <= 80:
-        score += 0.10
-    elif len(words) < 5 or len(words) > 100:
-        score -= 0.20
-
-    score = max(0.0, min(1.0, score))
-    return {
-        "score":        round(score, 4),
-        "check_worthy": score >= CHECK_WORTHY_THRESHOLD,
-        "source":       "local_heuristic_v2",
-        "signals":      signals,
-    }
 
 
 def _try_load_faiss_retriever():
@@ -164,9 +97,9 @@ def _try_load_faiss_retriever():
 class EvidenceRetrievalModule:
     """
     Evidence retrieval:
-      Primary   — FAISS (BGE-M3 corpus)
-      Fallback1 — Live search (when FAISS coverage == 0)
-      Fallback2 — Hardcoded corpus (when FAISS index missing entirely)
+      Primary   — Live search (Google News RSS + Fact Check API)
+      Fallback1 — FAISS (BGE-M3 corpus) when live returns nothing
+      Fallback2 — Hardcoded corpus when FAISS index missing entirely
 
     Pre-retrieval:
       Local heuristic scores each claim for check-worthiness.
@@ -257,19 +190,36 @@ class EvidenceRetrievalModule:
         self,
         claim_text: str,
         top_k: int = 5,
-        check_worthiness: Optional[Dict] = None,  # kept for backward compat, ignored in MIL mode
+        mode: str = "claim",
+        model=None,
     ) -> Tuple[List[Dict], bool]:
         """
         Return (results, any_found).
 
-        v4.0 MIL: check_worthiness is accepted but ignored — every topic
-        submitted by a learner is worth retrieving context for. The old gate
-        pre-judged queries using a heuristic designed for politician claims,
-        not MIL learners. top_k raised 3 → 5 for more perspectives.
+        Priority: live search → FAISS → hardcoded corpus.
+
+        model is the embedding model passed in from the orchestrator.
+        If not provided, ModelRegistry.embed() is called internally.
+        mode is forwarded to FAISS retriever.search() when used as fallback.
         """
+        # 1. Live search — always first
+        _model = model or ModelRegistry.embed()
+        live_results, live_found = self.retrieve_live(claim_text, _model, top_k)
+        if live_found:
+            return live_results, True
+
+        # 2. FAISS — fallback when live returns nothing
+        logger.info("[EvidenceRetrieval] Live search empty — falling back to FAISS.")
         retriever = _try_load_faiss_retriever()
         if retriever:
-            return self._retrieve_faiss(claim_text, top_k, retriever)
+            faiss_results, faiss_found = self._retrieve_faiss(
+                claim_text, top_k, retriever, mode=mode
+            )
+            if faiss_found:
+                return faiss_results, True
+
+        # 3. Hardcoded corpus — last resort when FAISS index missing
+        logger.info("[EvidenceRetrieval] FAISS empty/unavailable — using hardcoded corpus.")
         return self._retrieve_hardcoded(claim_text, top_k)
 
     def retrieve_live(self, claim_text: str, model, top_k: int = 5) -> Tuple[List[Dict], bool]:
@@ -321,15 +271,19 @@ class EvidenceRetrievalModule:
     # ── FAISS retrieval ───────────────────────────────────────────────────────
 
     def _retrieve_faiss(
-        self, claim_text: str, top_k: int, retriever
+        self, claim_text: str, top_k: int, retriever, mode: str = "claim"
     ) -> Tuple[List[Dict], bool]:
         """
         v4.0 MIL: requests top_k * 3 candidates (was top_k * 2).
         The extra headroom gives the MMR reranker in retriever.py more
         material to enforce diversity across genuinely different angles.
+
+        mode is forwarded to retriever.search() to select MMR lambda:
+          "submission" → λ=0.5 (broader, more diverse — corroboration section)
+          "claim"      → λ=0.7 (tighter, relevance-first — user claim section)
         """
         try:
-            raw_results = retriever.search(claim_text, k=top_k * 3)
+            raw_results = retriever.search(claim_text, k=top_k * 3, mode=mode)
         except Exception as e:
             logger.warning(f"[EvidenceRetrieval] FAISS search failed: {e}. Falling back.")
             return self._retrieve_hardcoded(claim_text, top_k)

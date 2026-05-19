@@ -64,6 +64,7 @@ from sqlalchemy.orm import Session
 from config import logger
 from database.models import engine
 from routers.auth import _verify
+from services.audit_log import log_action, extract_admin_context
 
 _CORPUS_DB = Path(__file__).resolve().parent / "data" / "corpus.db"
 
@@ -83,7 +84,7 @@ def _require_admin(authorization: Optional[str], request: Request = None):
     payload = _verify(token)
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required.")
-    return payload
+    return payload  # callers can capture this for audit context
 
 
 # ── File Upload ───────────────────────────────────────────────────────────────
@@ -107,7 +108,7 @@ async def upload_media(
     authorization: str             = Header(None),
 ):
     """
-    Upload an image, video, or file for use in quiz / prebunking questions.
+    Upload an image, video, or file for use in quiz questions.
     Returns { url, filename, media_type, size }.
     Files are stored under assets/uploads/ and served at /assets/uploads/<filename>.
     """
@@ -153,32 +154,109 @@ async def upload_media(
     return {"url": url, "filename": unique_name, "media_type": detected_type, "size": size}
 
 
+@router.delete("/upload/cleanup-orphans")
+async def cleanup_orphaned_uploads(
+    request:       Request = None,
+    authorization: str     = Header(None),
+):
+    """
+    Scan assets/uploads/ and delete any file whose URL is not referenced by
+    any quiz_question (image_url, video_url) or lessons (image_url) row.
+    Returns a summary of deleted and retained file counts.
+    """
+    _require_admin(authorization, request)
+    db = Session(engine)
+    try:
+        # Collect every URL stored in the DB that lives under /assets/uploads/
+        used_urls: set[str] = set()
+        try:
+            for row in db.execute(sa.text(
+                "SELECT image_url, video_url FROM quiz_questions WHERE image_url IS NOT NULL OR video_url IS NOT NULL"
+            )).fetchall():
+                if row.image_url: used_urls.add(row.image_url)
+                if row.video_url: used_urls.add(row.video_url)
+        except Exception:
+            # video_url column may not exist on older schema — fall back to image_url only
+            for row in db.execute(sa.text(
+                "SELECT image_url FROM quiz_questions WHERE image_url IS NOT NULL"
+            )).fetchall():
+                if row.image_url: used_urls.add(row.image_url)
+        for row in db.execute(sa.text(
+            "SELECT image_url FROM lessons WHERE image_url IS NOT NULL"
+        )).fetchall():
+            if row.image_url: used_urls.add(row.image_url)
+
+        deleted, retained = [], []
+        if _UPLOAD_DIR.exists():
+            for f in _UPLOAD_DIR.iterdir():
+                if not f.is_file():
+                    continue
+                url_path = f"/assets/uploads/{f.name}"
+                if url_path in used_urls:
+                    retained.append(f.name)
+                else:
+                    f.unlink(missing_ok=True)
+                    deleted.append(f.name)
+                    logger.info(f"[Cleanup] Deleted orphaned upload: {f.name}")
+
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "upload.cleanup_orphans", "upload", None,
+            entity_label=f"deleted={len(deleted)}",
+            detail={"deleted": deleted},
+            **extract_admin_context(request, _adm),
+        )
+        return {
+            "deleted_count": len(deleted),
+            "retained_count": len(retained),
+            "deleted_files": deleted,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        db.close()
+
+
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class QuizQuestionCreate(BaseModel):
-    lesson_id:     Optional[int]  = None
-    question_text: str            = Field(..., min_length=10)
-    options:       List[str]      = Field(..., min_items=2, max_items=6)
-    correct_index: int            = Field(..., ge=0)
-    explanation:   Optional[str]  = None
-    topic:         str            = Field(..., description="claim_detection|source_verification|bias_detection|evidence_evaluation|general")
-    difficulty:    str            = Field("beginner", description="beginner|intermediate|advanced")
-    image_url:     Optional[str]  = Field(None, max_length=512, description="Optional URL to a scenario image")
-    video_url:     Optional[str]  = Field(None, max_length=1024, description="Optional URL to a video (YouTube embed, mp4, etc.)")
-    media_type:    str            = Field("text", description="text|image|video|file")
+    lesson_id:      Optional[int]       = None
+    question_text:  str                 = Field(..., min_length=10)
+    question_type:  str                 = Field("multiple_choice", description="multiple_choice|multiple_answer|true_false|identification|scenario_based")
+    options:        List[str]           = Field(default_factory=list)
+    correct_index:  int                 = Field(0, ge=0)
+    correct_indices: Optional[List[int]] = None   # for multiple_answer
+    correct_answer: Optional[str]       = None    # for identification (case-insensitive)
+    scenario_text:  Optional[str]       = None    # for scenario_based
+    explanation:    Optional[str]       = None
+    hint:           Optional[str]       = None
+    topic:          str                 = Field(..., description="claim_detection|source_verification|bias_detection|evidence_evaluation|general")
+    difficulty:     str                 = Field("beginner", description="beginner|intermediate|advanced")
+    image_url:      Optional[str]       = Field(None, max_length=512)
+    video_url:      Optional[str]       = Field(None, max_length=1024)
+    media_type:     str                 = Field("text", description="text|image|video|file")
+    mindmap_node_id: Optional[str]      = Field(None, max_length=64)
 
 
 class QuizQuestionUpdate(BaseModel):
-    lesson_id:     Optional[int]  = None
-    question_text: Optional[str]  = None
-    options:       Optional[List[str]] = None
-    correct_index: Optional[int]  = None
-    explanation:   Optional[str]  = None
-    topic:         Optional[str]  = None
-    difficulty:    Optional[str]  = None
-    image_url:     Optional[str]  = Field(None, max_length=512)
-    video_url:     Optional[str]  = Field(None, max_length=1024)
-    media_type:    Optional[str]  = None
+    lesson_id:      Optional[int]       = None
+    question_text:  Optional[str]       = None
+    question_type:  Optional[str]       = None
+    options:        Optional[List[str]] = None
+    correct_index:  Optional[int]       = None
+    correct_indices: Optional[List[int]] = None
+    correct_answer: Optional[str]       = None
+    scenario_text:  Optional[str]       = None
+    explanation:    Optional[str]       = None
+    hint:           Optional[str]       = None
+    topic:          Optional[str]       = None
+    difficulty:     Optional[str]       = None
+    image_url:      Optional[str]       = Field(None, max_length=512)
+    video_url:      Optional[str]       = Field(None, max_length=1024)
+    media_type:     Optional[str]       = None
+    mindmap_node_id: Optional[str]      = Field(None, max_length=64)
 
 
 class LessonCreate(BaseModel):
@@ -191,17 +269,20 @@ class LessonCreate(BaseModel):
     sort_order:             Optional[int] = None
     prerequisite_lesson_id: Optional[int] = None
     image_url:              Optional[str] = Field(None, max_length=512)
+    mindmap_node_id:        Optional[str] = Field(None, max_length=64)
 
 
 class LessonUpdate(BaseModel):
-    title:                  Optional[str] = None
-    content:                Optional[str] = None
-    topic:                  Optional[str] = None
-    difficulty:             Optional[str] = None
-    mil_skill:              Optional[str] = None
-    sort_order:             Optional[int] = None
-    prerequisite_lesson_id: Optional[int] = None
-    image_url:              Optional[str] = Field(None, max_length=512)
+    title:                  Optional[str]  = None
+    content:                Optional[str]  = None
+    topic:                  Optional[str]  = None
+    difficulty:             Optional[str]  = None
+    mil_skill:              Optional[str]  = None
+    sort_order:             Optional[int]  = None
+    prerequisite_lesson_id: Optional[int]  = None
+    image_url:              Optional[str]  = Field(None, max_length=512)
+    is_published:           Optional[bool] = None
+    mindmap_node_id:        Optional[str]  = Field(None, max_length=64)
 
 
 class RoleUpdate(BaseModel):
@@ -222,62 +303,7 @@ class UserUpdate(BaseModel):
     role:     Optional[str] = None
 
 
-class PrebunkingTechniqueCreate(BaseModel):
-    technique_id: str            = Field(..., min_length=2, max_length=64,
-                                         description="Snake_case identifier, e.g. 'appeal_to_nature'")
-    name:         str            = Field(..., min_length=2, max_length=255)
-    description:  Optional[str] = None
-    module:       Optional[int] = None
-    sort_order:   int            = Field(0, ge=0)
-    is_active:    bool           = True
-
-
-class PrebunkingTechniqueUpdate(BaseModel):
-    name:        Optional[str]  = None
-    description: Optional[str] = None
-    module:      Optional[int] = None
-    sort_order:  Optional[int] = None
-    is_active:   Optional[bool] = None
-
-
-class PrebunkingQuestionCreate(BaseModel):
-    technique_id:  str            = Field(..., description="Must match a technique_id in prebunking_techniques")
-    question_text: str            = Field(..., min_length=10)
-    option_a:      str            = Field(..., min_length=1)
-    option_b:      str            = Field(..., min_length=1)
-    option_c:      str            = Field(..., min_length=1)
-    option_d:      str            = Field(..., min_length=1)
-    correct_answer: str           = Field(..., description="A, B, C, or D")
-    explanation:   Optional[str]  = None
-    image_url:     Optional[str]  = Field(None, max_length=512, description="Optional URL to a scenario image")
-    video_url:     Optional[str]  = Field(None, max_length=1024, description="Optional URL to a video")
-    media_type:    str            = Field("text", description="text|image|video|file")
-
-
-class PrebunkingQuestionUpdate(BaseModel):
-    technique_id:  Optional[str] = None
-    question_text: Optional[str] = None
-    option_a:      Optional[str] = None
-    option_b:      Optional[str] = None
-    option_c:      Optional[str] = None
-    option_d:      Optional[str] = None
-    correct_answer: Optional[str] = None
-    explanation:   Optional[str] = None
-    image_url:     Optional[str] = Field(None, max_length=512)
-    video_url:     Optional[str] = Field(None, max_length=1024)
-    media_type:    Optional[str] = None
-
-
 class CorpusIngestRequest(BaseModel):
-    sentences:     List[str]
-    source_domain: str
-    source_name:   str
-    url:           Optional[str] = ""
-    pipeline:      str           = "stats"
-    reputation:    float         = 0.95
-
-
-
     sentences:     List[str]
     source_domain: str
     source_name:   str
@@ -349,16 +375,172 @@ async def get_admin_stats(request: Request, authorization: str = Header(None)):
         db.close()
 
 
+class TopicCreate(BaseModel):
+    key:             str = Field(..., min_length=2, max_length=60,
+                                 pattern=r'^[a-z][a-z0-9_]*$',
+                                 description="snake_case key, e.g. critical_thinking")
+    label:           str = Field(..., min_length=2, max_length=100)
+    icon:            str = Field("📄", max_length=10)
+    color_hue:       int = Field(220, ge=0, le=359)
+    sort_order:      int = Field(0)
+    quiz_limit:      Optional[int] = Field(None, ge=1, description="Max questions shown per session; null = no limit")
+    linked_quiz_ids: Optional[List[int]] = Field(None, description="Explicit list of question IDs for this topic")
+
+class TopicUpdate(BaseModel):
+    label:           Optional[str] = Field(None, min_length=2, max_length=100)
+    icon:            Optional[str] = Field(None, max_length=10)
+    color_hue:       Optional[int] = Field(None, ge=0, le=359)
+    sort_order:      Optional[int] = None
+    quiz_limit:      Optional[int] = Field(None, ge=1)
+    clear_quiz_limit: Optional[bool] = None   # set True to remove the limit
+    linked_quiz_ids: Optional[List[int]] = None  # None = don't touch; [] = remove all links
+
+
 @router.get("/topics")
 async def list_topics(request: Request, authorization: str = Header(None)):
-    """Return all distinct topics used in lessons and quiz_questions."""
+    """Return all topics from the lesson_topics registry (admin-managed)."""
     _require_admin(authorization, request)
     db = Session(engine)
     try:
-        lesson_topics = db.execute(sa.text("SELECT DISTINCT topic FROM lessons WHERE topic IS NOT NULL")).fetchall()
-        quiz_topics   = db.execute(sa.text("SELECT DISTINCT topic FROM quiz_questions WHERE topic IS NOT NULL")).fetchall()
-        topics = sorted(set(r[0] for r in lesson_topics) | set(r[0] for r in quiz_topics))
-        return {"topics": topics}
+        rows = db.execute(sa.text(
+            "SELECT `key`, label, icon, color_hue, sort_order, quiz_limit "
+            "FROM lesson_topics ORDER BY sort_order, `key`"
+        )).fetchall()
+        link_rows = db.execute(sa.text(
+            "SELECT topic_key, question_id FROM topic_quiz_links ORDER BY topic_key, question_id"
+        )).fetchall()
+        links_by_topic: dict = {}
+        for lr in link_rows:
+            links_by_topic.setdefault(lr[0], []).append(lr[1])
+        return {"topics": [
+            {"key": r[0], "label": r[1], "icon": r[2],
+             "color_hue": r[3], "sort_order": r[4],
+             "quiz_limit": r[5],
+             "linked_quiz_ids": links_by_topic.get(r[0], None)}
+            for r in rows
+        ]}
+    finally:
+        db.close()
+
+
+@router.post("/topics", status_code=201)
+async def create_topic(
+    body: TopicCreate,
+    request: Request,
+    authorization: str = Header(None),
+):
+    """Create a new topic. Key must be unique snake_case."""
+    ctx = _require_admin(authorization, request)
+    db = Session(engine)
+    try:
+        exists = db.execute(sa.text(
+            "SELECT COUNT(*) FROM lesson_topics WHERE `key` = :k"
+        ), {"k": body.key}).scalar()
+        if exists:
+            raise HTTPException(status_code=409, detail=f"Topic key '{body.key}' already exists.")
+        db.execute(sa.text(
+            "INSERT INTO lesson_topics (`key`, label, icon, color_hue, sort_order, quiz_limit) "
+            "VALUES (:key, :label, :icon, :hue, :sort, :quiz_limit)"
+        ), {"key": body.key, "label": body.label, "icon": body.icon,
+            "hue": body.color_hue, "sort": body.sort_order, "quiz_limit": body.quiz_limit})
+        db.commit()
+        if body.linked_quiz_ids is not None:
+            db.execute(sa.text("DELETE FROM topic_quiz_links WHERE topic_key = :k"), {"k": body.key})
+            for qid in body.linked_quiz_ids:
+                db.execute(sa.text(
+                    "INSERT IGNORE INTO topic_quiz_links (topic_key, question_id) VALUES (:k, :qid)"
+                ), {"k": body.key, "qid": qid})
+            db.commit()
+        log_action("topic.create", "topic", body.key,
+                   entity_label=body.label,
+                   detail={"label": body.label, "icon": body.icon},
+                   **extract_admin_context(request, ctx))
+        return {"key": body.key, "label": body.label, "icon": body.icon,
+                "color_hue": body.color_hue, "sort_order": body.sort_order,
+                "quiz_limit": body.quiz_limit, "linked_quiz_ids": body.linked_quiz_ids}
+    finally:
+        db.close()
+
+
+@router.put("/topics/{key}")
+async def update_topic(
+    key: str,
+    body: TopicUpdate,
+    request: Request,
+    authorization: str = Header(None),
+):
+    """Edit label, icon, color_hue, or sort_order of an existing topic."""
+    ctx = _require_admin(authorization, request)
+    db = Session(engine)
+    try:
+        exists = db.execute(sa.text(
+            "SELECT COUNT(*) FROM lesson_topics WHERE `key` = :k"
+        ), {"k": key}).scalar()
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"Topic '{key}' not found.")
+        fields, params = [], {"k": key}
+        if body.label      is not None: fields.append("label = :label");           params["label"] = body.label
+        if body.icon       is not None: fields.append("icon = :icon");             params["icon"]  = body.icon
+        if body.color_hue  is not None: fields.append("color_hue = :hue");         params["hue"]   = body.color_hue
+        if body.sort_order is not None: fields.append("sort_order = :sort");       params["sort"]  = body.sort_order
+        if body.clear_quiz_limit:
+            fields.append("quiz_limit = NULL")
+        elif body.quiz_limit is not None:
+            fields.append("quiz_limit = :quiz_limit"); params["quiz_limit"] = body.quiz_limit
+        if not fields and body.linked_quiz_ids is None:
+            raise HTTPException(status_code=400, detail="Nothing to update.")
+        if fields:
+            db.execute(sa.text(
+                f"UPDATE lesson_topics SET {', '.join(fields)} WHERE `key` = :k"
+            ), params)
+            db.commit()
+        if body.linked_quiz_ids is not None:
+            db.execute(sa.text("DELETE FROM topic_quiz_links WHERE topic_key = :k"), {"k": key})
+            for qid in body.linked_quiz_ids:
+                db.execute(sa.text(
+                    "INSERT IGNORE INTO topic_quiz_links (topic_key, question_id) VALUES (:k, :qid)"
+                ), {"k": key, "qid": qid})
+            db.commit()
+        log_action("topic.update", "topic", key,
+                   detail=body.model_dump(exclude_none=True),
+                   **extract_admin_context(request, ctx))
+        row = db.execute(sa.text(
+            "SELECT `key`, label, icon, color_hue, sort_order, quiz_limit FROM lesson_topics WHERE `key` = :k"
+        ), {"k": key}).fetchone()
+        link_rows = db.execute(sa.text(
+            "SELECT question_id FROM topic_quiz_links WHERE topic_key = :k ORDER BY question_id"
+        ), {"k": key}).fetchall()
+        linked_ids = [lr[0] for lr in link_rows] if link_rows else None
+        return {"key": row[0], "label": row[1], "icon": row[2],
+                "color_hue": row[3], "sort_order": row[4],
+                "quiz_limit": row[5], "linked_quiz_ids": linked_ids}
+    finally:
+        db.close()
+
+
+@router.delete("/topics/{key}", status_code=204)
+async def delete_topic(
+    key: str,
+    request: Request,
+    authorization: str = Header(None),
+):
+    """
+    Delete a topic from the registry.
+    Lessons/quiz questions that already use this key are NOT deleted — they
+    just won't match a registry entry until reassigned.
+    """
+    ctx = _require_admin(authorization, request)
+    db = Session(engine)
+    try:
+        exists = db.execute(sa.text(
+            "SELECT COUNT(*) FROM lesson_topics WHERE `key` = :k"
+        ), {"k": key}).scalar()
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"Topic '{key}' not found.")
+        db.execute(sa.text("DELETE FROM lesson_topics WHERE `key` = :k"), {"k": key})
+        db.commit()
+        log_action("topic.delete", "topic", key,
+                   **extract_admin_context(request, ctx))
     finally:
         db.close()
 
@@ -406,6 +588,11 @@ async def list_quiz_questions(
                     row["options"] = json.loads(row["options"])
                 except Exception:
                     pass
+            if isinstance(row.get("correct_indices"), str):
+                try:
+                    row["correct_indices"] = json.loads(row["correct_indices"])
+                except Exception:
+                    pass
             result.append(row)
         return result
     finally:
@@ -436,19 +623,31 @@ async def create_quiz_question(
     db = Session(engine)
     try:
         result = db.execute(sa.text("""
-            INSERT INTO quiz_questions (lesson_id, question_text, options, correct_index, explanation, topic, difficulty, image_url, video_url, media_type)
-            VALUES (:lesson_id, :question_text, :options, :correct_index, :explanation, :topic, :difficulty, :image_url, :video_url, :media_type)
+            INSERT INTO quiz_questions
+                (lesson_id, question_text, question_type, options, correct_index, correct_indices,
+                 correct_answer, scenario_text, explanation, hint, topic, difficulty, image_url, video_url, media_type,
+                 mindmap_node_id)
+            VALUES
+                (:lesson_id, :question_text, :question_type, :options, :correct_index, :correct_indices,
+                 :correct_answer, :scenario_text, :explanation, :hint, :topic, :difficulty, :image_url, :video_url, :media_type,
+                 :mindmap_node_id)
         """), {
-            "lesson_id":     body.lesson_id,
-            "question_text": body.question_text,
-            "options":       json.dumps(body.options),
-            "correct_index": body.correct_index,
-            "explanation":   body.explanation,
-            "topic":         body.topic,
-            "difficulty":    body.difficulty,
-            "image_url":     body.image_url,
-            "video_url":     body.video_url,
-            "media_type":    body.media_type or "text",
+            "lesson_id":      body.lesson_id,
+            "question_text":  body.question_text,
+            "question_type":  body.question_type or "multiple_choice",
+            "options":        json.dumps(body.options),
+            "correct_index":  body.correct_index,
+            "correct_indices": json.dumps(body.correct_indices) if body.correct_indices is not None else None,
+            "correct_answer": body.correct_answer,
+            "scenario_text":  body.scenario_text,
+            "explanation":    body.explanation,
+            "hint":           body.hint,
+            "topic":          body.topic,
+            "difficulty":     body.difficulty,
+            "image_url":      body.image_url,
+            "video_url":      body.video_url,
+            "media_type":     body.media_type or "text",
+            "mindmap_node_id": body.mindmap_node_id,
         })
         db.commit()
         new_id = result.lastrowid
@@ -456,6 +655,13 @@ async def create_quiz_question(
         out = dict(row._mapping)
         if isinstance(out.get("options"), str):
             out["options"] = json.loads(out["options"])
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "quiz_question.create", "quiz_question", new_id,
+            entity_label=(body.question_text or "")[:80],
+            detail={"topic": body.topic, "difficulty": body.difficulty},
+            **extract_admin_context(request, _adm),
+        )
         return out
     except Exception as exc:
         db.rollback()
@@ -484,16 +690,26 @@ async def update_quiz_question(
         fields, params = [], {"id": question_id}
         if body.question_text is not None:
             fields.append("question_text = :question_text"); params["question_text"] = body.question_text
+        if body.question_type is not None:
+            fields.append("question_type = :question_type"); params["question_type"] = body.question_type
         if body.options is not None:
             # Validate correct_index against new options if both provided
             ci = body.correct_index if body.correct_index is not None else existing.correct_index
-            if ci >= len(body.options):
+            if body.question_type not in ("identification", "multiple_answer") and ci >= len(body.options):
                 raise HTTPException(status_code=422, detail="correct_index out of range for given options.")
             fields.append("options = :options"); params["options"] = json.dumps(body.options)
         if body.correct_index is not None:
             fields.append("correct_index = :correct_index"); params["correct_index"] = body.correct_index
+        if body.correct_indices is not None:
+            fields.append("correct_indices = :correct_indices"); params["correct_indices"] = json.dumps(body.correct_indices)
+        if body.correct_answer is not None:
+            fields.append("correct_answer = :correct_answer"); params["correct_answer"] = body.correct_answer
+        if body.scenario_text is not None:
+            fields.append("scenario_text = :scenario_text"); params["scenario_text"] = body.scenario_text
         if body.explanation is not None:
             fields.append("explanation = :explanation"); params["explanation"] = body.explanation
+        if body.hint is not None:
+            fields.append("hint = :hint"); params["hint"] = body.hint
         if body.topic is not None:
             fields.append("topic = :topic"); params["topic"] = body.topic
         if body.difficulty is not None:
@@ -506,6 +722,8 @@ async def update_quiz_question(
             fields.append("video_url = :video_url"); params["video_url"] = body.video_url
         if body.media_type is not None:
             fields.append("media_type = :media_type"); params["media_type"] = body.media_type
+        if body.mindmap_node_id is not None:
+            fields.append("mindmap_node_id = :mindmap_node_id"); params["mindmap_node_id"] = body.mindmap_node_id or None
 
         if not fields:
             return {"detail": "Nothing to update."}
@@ -516,6 +734,13 @@ async def update_quiz_question(
         out = dict(row._mapping)
         if isinstance(out.get("options"), str):
             out["options"] = json.loads(out["options"])
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "quiz_question.update", "quiz_question", question_id,
+            entity_label=(body.question_text or existing.question_text or "")[:80],
+            detail={k: params[k] for k in fields if k not in ("id",) and k in params},
+            **extract_admin_context(request, _adm),
+        )
         return out
     except HTTPException:
         raise
@@ -532,17 +757,65 @@ async def delete_quiz_question(
     request:       Request = None,
     authorization: str     = Header(None),
 ):
-    """Delete a quiz question and all its attempt records."""
+    """Delete a quiz question and all its attempt records.
+    If the question's image_url points to a local upload that is not referenced
+    by any other quiz question or lesson, the file is also removed from disk.
+    """
     _require_admin(authorization, request)
     db = Session(engine)
     try:
         existing = db.execute(
-            sa.text("SELECT id FROM quiz_questions WHERE id = :id"), {"id": question_id}
+            sa.text("SELECT id, image_url FROM quiz_questions WHERE id = :id"), {"id": question_id}
         ).fetchone()
         if not existing:
             raise HTTPException(status_code=404, detail="Question not found.")
+
+        image_url_to_check = existing.image_url  # may be None
+        # Also grab video_url if the column exists
+        video_url_to_check = None
+        try:
+            vrow = db.execute(
+                sa.text("SELECT video_url FROM quiz_questions WHERE id = :id"), {"id": question_id}
+            ).fetchone()
+            if vrow:
+                video_url_to_check = vrow.video_url
+        except Exception:
+            pass  # column not yet migrated
+
         db.execute(sa.text("DELETE FROM quiz_questions WHERE id = :id"), {"id": question_id})
         db.commit()
+
+        # ── Orphan cleanup: delete any local upload only if no other record references it ──
+        for url_to_check in [image_url_to_check, video_url_to_check]:
+            if not url_to_check or not url_to_check.startswith("/assets/uploads/"):
+                continue
+            other_quiz_img = db.execute(
+                sa.text("SELECT id FROM quiz_questions WHERE image_url = :url LIMIT 1"),
+                {"url": url_to_check},
+            ).fetchone()
+            other_quiz_vid = None
+            try:
+                other_quiz_vid = db.execute(
+                    sa.text("SELECT id FROM quiz_questions WHERE video_url = :url LIMIT 1"),
+                    {"url": url_to_check},
+                ).fetchone()
+            except Exception:
+                pass
+            other_lesson = db.execute(
+                sa.text("SELECT id FROM lessons WHERE image_url = :url LIMIT 1"),
+                {"url": url_to_check},
+            ).fetchone()
+            if not other_quiz_img and not other_quiz_vid and not other_lesson:
+                file_path = _UPLOAD_DIR / Path(url_to_check).name
+                file_path.unlink(missing_ok=True)
+                logger.info(f"[Upload] Deleted orphaned file {file_path.name}")
+
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "quiz_question.delete", "quiz_question", question_id,
+            entity_label=str(question_id),
+            **extract_admin_context(request, _adm),
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -628,14 +901,8 @@ async def admin_list_lessons(request: Request, authorization: str = Header(None)
         rows = db.execute(sa.text("""
             SELECT
                 l.*,
-                COUNT(DISTINCT lt.id)               AS trigger_count,
-                SUM(lt.was_read)                    AS read_count,
-                ROUND(AVG(lt.was_read) * 100, 1)    AS read_rate_pct,
-                COUNT(DISTINCT lc.id)               AS completion_count,
                 COUNT(DISTINCT qq.id)               AS question_count
             FROM lessons l
-            LEFT JOIN lessons_triggered lt ON lt.lesson_id = l.id
-            LEFT JOIN lesson_completions lc ON lc.lesson_id = l.id
             LEFT JOIN quiz_questions qq ON qq.lesson_id = l.id
             GROUP BY l.id
             ORDER BY COALESCE(l.sort_order, 9999), l.topic, l.id
@@ -666,16 +933,25 @@ async def create_lesson(
         if existing:
             raise HTTPException(status_code=409, detail="lesson_key already exists.")
         result = db.execute(sa.text("""
-            INSERT INTO lessons (lesson_key, title, content, topic, difficulty, mil_skill, sort_order, prerequisite_lesson_id, image_url, created_at)
-            VALUES (:lesson_key, :title, :content, :topic, :difficulty, :mil_skill, :sort_order, :prereq, :image_url, :now)
+            INSERT INTO lessons (lesson_key, title, content, topic, difficulty, mil_skill, sort_order, prerequisite_lesson_id, image_url, mindmap_node_id, created_at)
+            VALUES (:lesson_key, :title, :content, :topic, :difficulty, :mil_skill, :sort_order, :prereq, :image_url, :mindmap_node_id, :now)
         """), {
             "lesson_key": body.lesson_key, "title": body.title, "content": body.content,
             "topic": body.topic, "difficulty": body.difficulty, "mil_skill": body.mil_skill,
             "sort_order": body.sort_order, "prereq": body.prerequisite_lesson_id,
-            "image_url": body.image_url, "now": datetime.now(timezone.utc),
+            "image_url": body.image_url, "mindmap_node_id": body.mindmap_node_id,
+            "now": datetime.now(timezone.utc),
         })
         db.commit()
-        row = db.execute(sa.text("SELECT * FROM lessons WHERE id = :id"), {"id": result.lastrowid}).fetchone()
+        new_id = result.lastrowid
+        row = db.execute(sa.text("SELECT * FROM lessons WHERE id = :id"), {"id": new_id}).fetchone()
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "lesson.create", "lesson", new_id,
+            entity_label=body.title,
+            detail={"topic": body.topic, "difficulty": body.difficulty, "lesson_key": body.lesson_key},
+            **extract_admin_context(request, _adm),
+        )
         return dict(row._mapping)
     except HTTPException:
         raise
@@ -711,12 +987,24 @@ async def update_lesson(
             fields.append("prerequisite_lesson_id = :prereq"); params["prereq"] = body.prerequisite_lesson_id
         if body.image_url is not None:
             fields.append("image_url = :image_url"); params["image_url"] = body.image_url
+        if body.is_published is not None:
+            fields.append("is_published = :is_published"); params["is_published"] = int(body.is_published)
+        if body.mindmap_node_id is not None:
+            fields.append("mindmap_node_id = :mindmap_node_id"); params["mindmap_node_id"] = body.mindmap_node_id or None
         if not fields:
             return {"detail": "Nothing to update."}
         db.execute(sa.text(f"UPDATE lessons SET {', '.join(fields)} WHERE id = :id"), params)
         db.commit()
         row = db.execute(sa.text("SELECT * FROM lessons WHERE id = :id"), {"id": lesson_id}).fetchone()
-        return dict(row._mapping)
+        out = dict(row._mapping)
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "lesson.update", "lesson", lesson_id,
+            entity_label=out.get("title", ""),
+            detail={k: params[k] for k in params if k not in ("id",)},
+            **extract_admin_context(request, _adm),
+        )
+        return out
     except HTTPException:
         raise
     except Exception as exc:
@@ -736,7 +1024,7 @@ async def delete_lesson(
     _require_admin(authorization, request)
     db = Session(engine)
     try:
-        existing = db.execute(sa.text("SELECT id FROM lessons WHERE id = :id"), {"id": lesson_id}).fetchone()
+        existing = db.execute(sa.text("SELECT id, title FROM lessons WHERE id = :id"), {"id": lesson_id}).fetchone()
         if not existing:
             raise HTTPException(status_code=404, detail="Lesson not found.")
         linked = db.execute(
@@ -744,8 +1032,15 @@ async def delete_lesson(
         ).scalar()
         if linked:
             raise HTTPException(status_code=409, detail=f"Cannot delete: {linked} quiz question(s) are linked to this lesson. Remove them first.")
+        lesson_title = existing[1] if existing else ""
         db.execute(sa.text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
         db.commit()
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "lesson.delete", "lesson", lesson_id,
+            entity_label=lesson_title,
+            **extract_admin_context(request, _adm),
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -839,9 +1134,17 @@ async def create_user(
         """), {"username": body.username, "email": body.email, "pw": pw_hash,
                "role": body.role, "now": datetime.now(timezone.utc)})
         db.commit()
+        new_user_id = result.lastrowid
         row = db.execute(sa.text(
             "SELECT id, username, email, role, created_at FROM users WHERE id = :id"
-        ), {"id": result.lastrowid}).fetchone()
+        ), {"id": new_user_id}).fetchone()
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "user.create", "user", new_user_id,
+            entity_label=body.username,
+            detail={"email": body.email, "role": body.role},
+            **extract_admin_context(request, _adm),
+        )
         return dict(row._mapping)
     except HTTPException:
         raise
@@ -904,6 +1207,16 @@ async def update_user(
         row = db.execute(sa.text(
             "SELECT id, username, email, role, created_at FROM users WHERE id = :id"
         ), {"id": user_id}).fetchone()
+        _adm = _require_admin(authorization, request)
+        changed = {k: v for k, v in body.dict(exclude_none=True).items() if k != "password"}
+        if "password" in body.dict(exclude_none=True):
+            changed["password"] = "***"
+        log_action(
+            "user.update", "user", user_id,
+            entity_label=body.username or str(user_id),
+            detail=changed,
+            **extract_admin_context(request, _adm),
+        )
         return dict(row._mapping)
     except HTTPException:
         raise
@@ -932,6 +1245,13 @@ async def update_user_role(
             raise HTTPException(status_code=404, detail="User not found.")
         db.execute(sa.text("UPDATE users SET role = :role WHERE id = :id"), {"role": body.role, "id": user_id})
         db.commit()
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "user.role_change", "user", user_id,
+            entity_label=str(user_id),
+            detail={"new_role": body.role},
+            **extract_admin_context(request, _adm),
+        )
         return {"user_id": user_id, "role": body.role}
     except HTTPException:
         raise
@@ -960,8 +1280,16 @@ async def delete_user(
             admin_count = db.execute(sa.text("SELECT COUNT(*) FROM users WHERE role = 'admin'")).scalar()
             if admin_count <= 1:
                 raise HTTPException(status_code=409, detail="Cannot delete the last admin account.")
+        username_snap = db.execute(sa.text("SELECT username FROM users WHERE id = :id"), {"id": user_id}).fetchone()
+        username_label = username_snap.username if username_snap else str(user_id)
         db.execute(sa.text("DELETE FROM users WHERE id = :id"), {"id": user_id})
         db.commit()
+        _adm = _require_admin(authorization, request)
+        log_action(
+            "user.delete", "user", user_id,
+            entity_label=username_label,
+            **extract_admin_context(request, _adm),
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -1135,534 +1463,470 @@ async def get_quiz_analytics(request: Request, authorization: str = Header(None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PREBUNKING TECHNIQUE MANAGEMENT  (admin-driven, no more hardcoded list)
+# PRETEST CLAIMS
 # ══════════════════════════════════════════════════════════════════════════════
 
-_VALID_ANSWERS = {"A", "B", "C", "D"}
+class PretestClaimBody(BaseModel):
+    text: str
+    question_type: str = "true_false"
+    correct_answer: Optional[str] = "True"
+    options: Optional[str] = None
+    correct_index: int = 0
+    sort_order: Optional[int] = None
+    is_active: Optional[int] = 1
 
-
-def _ensure_prebunking_tables(conn):
-    """Create prebunking_techniques and prebunking_questions tables if missing."""
-    conn.execute(sa.text("""
-        CREATE TABLE IF NOT EXISTS prebunking_techniques (
-            id           INT AUTO_INCREMENT PRIMARY KEY,
-            technique_id VARCHAR(64)  NOT NULL UNIQUE,
-            name         VARCHAR(255) NOT NULL,
-            description  TEXT         NULL,
-            module       INT          NULL,
-            sort_order   INT          NOT NULL DEFAULT 0,
-            is_active    TINYINT(1)   NOT NULL DEFAULT 1,
-            created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_pbt_active (is_active)
-        )
-    """))
-    conn.execute(sa.text("""
-        CREATE TABLE IF NOT EXISTS prebunking_questions (
-            id             INT AUTO_INCREMENT PRIMARY KEY,
-            technique_id   VARCHAR(64)  NOT NULL,
-            question_text  TEXT         NOT NULL,
-            option_a       VARCHAR(500) NOT NULL,
-            option_b       VARCHAR(500) NOT NULL,
-            option_c       VARCHAR(500) NOT NULL,
-            option_d       VARCHAR(500) NOT NULL,
-            correct_answer VARCHAR(1)   NOT NULL,
-            explanation    TEXT         NULL,
-            image_url      VARCHAR(512) NULL,
-            created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
-                               ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_pbq_technique (technique_id)
-        )
-    """))
-    conn.commit()
-
-
-def _get_valid_technique_ids(db) -> set:
-    """Return set of active technique_ids from DB (empty = no validation)."""
-    try:
-        rows = db.execute(sa.text(
-            "SELECT technique_id FROM prebunking_techniques WHERE is_active = 1"
-        )).fetchall()
-        return {r[0] for r in rows}
-    except Exception:
-        return set()
-
-
-# ── Prebunking Technique CRUD ─────────────────────────────────────────────────
-
-@router.get("/prebunking-techniques")
-async def list_prebunking_techniques(
-    request:       Request = None,
-    authorization: str     = Header(None),
-):
-    """List all prebunking techniques (active and inactive)."""
+@router.get("/pretest-claims")
+async def list_pretest_claims(request: Request, authorization: str = Header(None)):
     _require_admin(authorization, request)
     db = Session(engine)
     try:
-        with engine.begin() as conn:
-            _ensure_prebunking_tables(conn)
         rows = db.execute(sa.text(
-            "SELECT * FROM prebunking_techniques ORDER BY sort_order, id"
+            "SELECT * FROM pretest_claims ORDER BY sort_order, id"
         )).fetchall()
         return [dict(r._mapping) for r in rows]
     finally:
         db.close()
 
-
-@router.post("/prebunking-techniques", status_code=201)
-async def create_prebunking_technique(
-    body:          PrebunkingTechniqueCreate,
-    request:       Request = None,
-    authorization: str     = Header(None),
-):
-    """Create a new prebunking technique. technique_id must be unique."""
-    _require_admin(authorization, request)
+@router.post("/pretest-claims", status_code=201)
+async def create_pretest_claim(body: PretestClaimBody, request: Request, authorization: str = Header(None)):
+    ctx = _require_admin(authorization, request)
     db = Session(engine)
     try:
-        with engine.begin() as conn:
-            _ensure_prebunking_tables(conn)
-        result = db.execute(sa.text("""
-            INSERT INTO prebunking_techniques
-                (technique_id, name, description, module, sort_order, is_active)
-            VALUES (:tid, :name, :desc, :mod, :sort, :active)
-        """), {
-            "tid":    body.technique_id,
-            "name":   body.name,
-            "desc":   body.description,
-            "mod":    body.module,
-            "sort":   body.sort_order,
-            "active": int(body.is_active),
-        })
+        result = db.execute(sa.text(
+            "INSERT INTO pretest_claims (text, question_type, correct_answer, options, correct_index, sort_order, is_active) "
+            "VALUES (:text, :qtype, :answer, :options, :cidx, :sort, :active)"
+        ), {"text": body.text, "qtype": body.question_type, "answer": body.correct_answer,
+            "options": body.options, "cidx": body.correct_index,
+            "sort": body.sort_order or 0, "active": body.is_active})
         db.commit()
-        row = db.execute(sa.text(
-            "SELECT * FROM prebunking_techniques WHERE id = :id"
-        ), {"id": result.lastrowid}).fetchone()
-        return dict(row._mapping)
-    except Exception as exc:
-        db.rollback()
-        if "Duplicate entry" in str(exc):
-            raise HTTPException(status_code=409, detail=f"technique_id '{body.technique_id}' already exists.")
-        raise HTTPException(status_code=500, detail=str(exc))
+        new_id = result.lastrowid
+        log_action("pretest_claim.create", "pretest_claim", new_id,
+                   entity_label=(body.text or "")[:80],
+                   detail={"question_type": body.question_type},
+                   **extract_admin_context(request, ctx))
+        return {"id": new_id}
     finally:
         db.close()
 
-
-@router.put("/prebunking-techniques/{technique_id}")
-async def update_prebunking_technique(
-    technique_id:  str,
-    body:          PrebunkingTechniqueUpdate,
-    request:       Request = None,
-    authorization: str     = Header(None),
-):
-    """Edit a technique (name, description, module, sort_order, is_active)."""
-    _require_admin(authorization, request)
+@router.put("/pretest-claims/{claim_id}")
+async def update_pretest_claim(claim_id: int, body: PretestClaimBody, request: Request, authorization: str = Header(None)):
+    ctx = _require_admin(authorization, request)
     db = Session(engine)
     try:
-        existing = db.execute(sa.text(
-            "SELECT id FROM prebunking_techniques WHERE technique_id = :tid"
-        ), {"tid": technique_id}).fetchone()
-        if not existing:
-            raise HTTPException(status_code=404, detail="Technique not found.")
-
-        fields, params = [], {"tid": technique_id}
-        for col, val in [
-            ("name",        body.name),
-            ("description", body.description),
-            ("module",      body.module),
-            ("sort_order",  body.sort_order),
-        ]:
-            if val is not None:
-                fields.append(f"{col} = :{col}"); params[col] = val
-        if body.is_active is not None:
-            fields.append("is_active = :is_active"); params["is_active"] = int(body.is_active)
-
-        if not fields:
-            return {"detail": "Nothing to update."}
-
         db.execute(sa.text(
-            f"UPDATE prebunking_techniques SET {', '.join(fields)} WHERE technique_id = :tid"
-        ), params)
+            "UPDATE pretest_claims SET text=:text, question_type=:qtype, correct_answer=:answer, "
+            "options=:options, correct_index=:cidx, sort_order=:sort, is_active=:active, "
+            "updated_at=NOW() WHERE id=:id"
+        ), {"text": body.text, "qtype": body.question_type, "answer": body.correct_answer,
+            "options": body.options, "cidx": body.correct_index,
+            "sort": body.sort_order or 0, "active": body.is_active, "id": claim_id})
         db.commit()
-        row = db.execute(sa.text(
-            "SELECT * FROM prebunking_techniques WHERE technique_id = :tid"
-        ), {"tid": technique_id}).fetchone()
-        return dict(row._mapping)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(exc))
+        log_action("pretest_claim.update", "pretest_claim", claim_id,
+                   entity_label=(body.text or "")[:80],
+                   **extract_admin_context(request, ctx))
+        return {"ok": True}
+    finally:
+        db.close()
+
+@router.delete("/pretest-claims/{claim_id}", status_code=204)
+async def delete_pretest_claim(claim_id: int, request: Request, authorization: str = Header(None)):
+    ctx = _require_admin(authorization, request)
+    db = Session(engine)
+    try:
+        existing = db.execute(sa.text("SELECT text FROM pretest_claims WHERE id=:id"), {"id": claim_id}).fetchone()
+        db.execute(sa.text("DELETE FROM pretest_claims WHERE id=:id"), {"id": claim_id})
+        db.commit()
+        log_action("pretest_claim.delete", "pretest_claim", claim_id,
+                   entity_label=(existing[0] if existing else "")[:80],
+                   **extract_admin_context(request, ctx))
     finally:
         db.close()
 
 
-@router.delete("/prebunking-techniques/{technique_id}", status_code=204)
-async def delete_prebunking_technique(
-    technique_id:  str,
-    request:       Request = None,
-    authorization: str     = Header(None),
-):
-    """
-    Hard-delete a technique. Prefer PUT is_active=false to preserve question history.
-    Associated questions are NOT auto-deleted.
-    """
+# ══════════════════════════════════════════════════════════════════════════════
+# EVAL QUESTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class BranchBody(BaseModel):
+    id: Optional[int] = None
+    trigger_condition: str = "equals"
+    trigger_value: Optional[str] = None
+    followup_prompt: Optional[str] = None
+    followup_type: str = "hint"
+    content_type: Optional[str] = None
+    lesson_id: Optional[int] = None
+    quiz_question_id: Optional[int] = None
+    content_url: Optional[str] = None
+    is_active: int = 1
+
+class EvalQuestionBody(BaseModel):
+    step_number: int = 1
+    title: str
+    step_label: Optional[str] = None
+    prompt: str
+    hint: Optional[str] = None
+    input_type: str = "text"
+    options: Optional[str] = None
+    is_active: Optional[int] = 1
+    step_link_type: Optional[str] = None   # url | lesson | quiz | mindmap | dashboard
+    step_link_value: Optional[str] = None  # the URL, lesson_key, quiz id, etc.
+    mindmap_node_id: Optional[str] = None  # FK → mindmap_nodes.id; completing this step unlocks the node
+    branches: Optional[list] = []
+
+def _load_branches(db, question_id: int):
+    rows = db.execute(sa.text(
+        "SELECT * FROM eval_question_branches WHERE question_id=:qid ORDER BY sort_order, id"
+    ), {"qid": question_id}).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+def _save_branches(db, question_id: int, branches: list):
+    """Upsert branches — keep existing IDs, delete removed ones."""
+    existing_ids = [r[0] for r in db.execute(sa.text(
+        "SELECT id FROM eval_question_branches WHERE question_id=:qid"
+    ), {"qid": question_id}).fetchall()]
+    kept_ids = []
+    for b in (branches or []):
+        if not b.get("followup_prompt"):
+            continue
+        bid = b.get("id")
+        params = {
+            "qid": question_id, "cond": b.get("trigger_condition", "equals"),
+            "tval": b.get("trigger_value") or "",
+            "prompt": b.get("followup_prompt"), "ftype": b.get("followup_type", "hint"),
+            "ctype": b.get("content_type") or None, "lid": b.get("lesson_id") or None,
+            "qqid": b.get("quiz_question_id") or None, "curl": b.get("content_url") or None,
+            "active": int(b.get("is_active", 1)),
+        }
+        if bid and int(bid) in existing_ids:
+            db.execute(sa.text(
+                "UPDATE eval_question_branches SET trigger_condition=:cond, trigger_value=:tval, "
+                "followup_prompt=:prompt, followup_type=:ftype, content_type=:ctype, "
+                "lesson_id=:lid, quiz_question_id=:qqid, content_url=:curl, is_active=:active "
+                "WHERE id=:bid AND question_id=:qid"
+            ), {**params, "bid": int(bid)})
+            kept_ids.append(int(bid))
+        else:
+            result = db.execute(sa.text(
+                "INSERT INTO eval_question_branches "
+                "(question_id, trigger_condition, trigger_value, followup_prompt, followup_type, "
+                "content_type, lesson_id, quiz_question_id, content_url, is_active) "
+                "VALUES (:qid,:cond,:tval,:prompt,:ftype,:ctype,:lid,:qqid,:curl,:active)"
+            ), params)
+            kept_ids.append(result.lastrowid)
+    # Delete removed branches
+    for eid in existing_ids:
+        if eid not in kept_ids:
+            db.execute(sa.text("DELETE FROM eval_question_branches WHERE id=:id"), {"id": eid})
+
+@router.get("/eval-questions")
+async def list_eval_questions(request: Request, authorization: str = Header(None)):
     _require_admin(authorization, request)
     db = Session(engine)
     try:
-        existing = db.execute(sa.text(
-            "SELECT id FROM prebunking_techniques WHERE technique_id = :tid"
-        ), {"tid": technique_id}).fetchone()
-        if not existing:
-            raise HTTPException(status_code=404, detail="Technique not found.")
+        rows = db.execute(sa.text(
+            "SELECT * FROM eval_questions ORDER BY step_number, id"
+        )).fetchall()
+        questions = [dict(r._mapping) for r in rows]
+        for q in questions:
+            q["branches"] = _load_branches(db, q["id"])
+        return questions
+    finally:
+        db.close()
+
+@router.post("/eval-questions", status_code=201)
+async def create_eval_question(body: EvalQuestionBody, request: Request, authorization: str = Header(None)):
+    ctx = _require_admin(authorization, request)
+    db = Session(engine)
+    try:
+        result = db.execute(sa.text(
+            "INSERT INTO eval_questions (step_number, title, step_label, prompt, hint, input_type, options, is_active, step_link_type, step_link_value, mindmap_node_id) "
+            "VALUES (:step, :title, :step_label, :prompt, :hint, :itype, :options, :active, :link_type, :link_value, :mindmap_node_id)"
+        ), {"step": body.step_number, "title": body.title, "step_label": body.step_label,
+            "prompt": body.prompt, "hint": body.hint, "itype": body.input_type,
+            "options": body.options, "active": body.is_active,
+            "link_type": body.step_link_type, "link_value": body.step_link_value,
+            "mindmap_node_id": body.mindmap_node_id})
+        qid = result.lastrowid
+        _save_branches(db, qid, body.branches or [])
+        db.commit()
+        log_action("eval_question.create", "eval_question", qid,
+                   entity_label=(body.title or body.prompt or "")[:80],
+                   detail={"step_number": body.step_number, "input_type": body.input_type},
+                   **extract_admin_context(request, ctx))
+        return {"id": qid}
+    finally:
+        db.close()
+
+@router.put("/eval-questions/{question_id}")
+async def update_eval_question(question_id: int, body: EvalQuestionBody, request: Request, authorization: str = Header(None)):
+    ctx = _require_admin(authorization, request)
+    db = Session(engine)
+    try:
         db.execute(sa.text(
-            "DELETE FROM prebunking_techniques WHERE technique_id = :tid"
-        ), {"tid": technique_id})
+            "UPDATE eval_questions SET step_number=:step, title=:title, step_label=:step_label, prompt=:prompt, "
+            "hint=:hint, input_type=:itype, options=:options, is_active=:active, "
+            "step_link_type=:link_type, step_link_value=:link_value, mindmap_node_id=:mindmap_node_id, "
+            "updated_at=NOW() WHERE id=:id"
+        ), {"step": body.step_number, "title": body.title, "step_label": body.step_label,
+            "prompt": body.prompt, "hint": body.hint, "itype": body.input_type,
+            "options": body.options, "active": body.is_active,
+            "link_type": body.step_link_type, "link_value": body.step_link_value,
+            "mindmap_node_id": body.mindmap_node_id,
+            "id": question_id})
+        _save_branches(db, question_id, body.branches or [])
         db.commit()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(exc))
+        log_action("eval_question.update", "eval_question", question_id,
+                   entity_label=(body.title or body.prompt or "")[:80],
+                   **extract_admin_context(request, ctx))
+        return {"ok": True}
     finally:
         db.close()
 
-
-# ── Prebunking Question CRUD ──────────────────────────────────────────────────
-
-@router.get("/prebunking-questions")
-async def list_prebunking_questions(
-    technique_id:  Optional[str] = None,
-    request:       Request       = None,
-    authorization: str           = Header(None),
-):
-    """List all prebunking questions with optional technique filter."""
-    _require_admin(authorization, request)
+@router.delete("/eval-questions/{question_id}", status_code=204)
+async def delete_eval_question(question_id: int, request: Request, authorization: str = Header(None)):
+    ctx = _require_admin(authorization, request)
     db = Session(engine)
     try:
-        with engine.begin() as conn:
-            _ensure_prebunking_tables(conn)
-        base   = "SELECT * FROM prebunking_questions"
-        params = {}
-        if technique_id:
-            base += " WHERE technique_id = :tid"; params["tid"] = technique_id
-        base += " ORDER BY technique_id, id"
-        rows = db.execute(sa.text(base), params).fetchall()
-        return [dict(r._mapping) for r in rows]
-    finally:
-        db.close()
-
-
-@router.post("/prebunking-questions", status_code=201)
-async def create_prebunking_question(
-    body:          PrebunkingQuestionCreate,
-    request:       Request = None,
-    authorization: str     = Header(None),
-):
-    """Create a new prebunking question. technique_id validated against DB."""
-    _require_admin(authorization, request)
-    db = Session(engine)
-    try:
-        with engine.begin() as conn:
-            _ensure_prebunking_tables(conn)
-        valid = _get_valid_technique_ids(db)
-        if valid and body.technique_id not in valid:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid technique_id '{body.technique_id}'. Valid: {sorted(valid)}"
-            )
-        if body.correct_answer.upper() not in _VALID_ANSWERS:
-            raise HTTPException(status_code=422, detail="correct_answer must be A, B, C, or D.")
-        result = db.execute(sa.text("""
-            INSERT INTO prebunking_questions
-                (technique_id, question_text, option_a, option_b, option_c, option_d,
-                 correct_answer, explanation, image_url, video_url, media_type, created_at, updated_at)
-            VALUES (:tid, :qtxt, :a, :b, :c, :d, :ans, :expl, :img, :vid, :mtype, :now, :now)
-        """), {
-            "tid":   body.technique_id, "qtxt": body.question_text,
-            "a":     body.option_a,     "b":    body.option_b,
-            "c":     body.option_c,     "d":    body.option_d,
-            "ans":   body.correct_answer.upper(),
-            "expl":  body.explanation,  "img":  body.image_url,
-            "vid":   body.video_url,    "mtype": body.media_type or "text",
-            "now":   datetime.now(timezone.utc),
-        })
+        existing = db.execute(sa.text("SELECT title, prompt FROM eval_questions WHERE id=:id"), {"id": question_id}).fetchone()
+        db.execute(sa.text("DELETE FROM eval_question_branches WHERE question_id=:id"), {"id": question_id})
+        db.execute(sa.text("DELETE FROM eval_questions WHERE id=:id"), {"id": question_id})
         db.commit()
-        row = db.execute(sa.text(
-            "SELECT * FROM prebunking_questions WHERE id = :id"
-        ), {"id": result.lastrowid}).fetchone()
-        return dict(row._mapping)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(exc))
+        label = ((existing[0] or existing[1]) if existing else "")[:80]
+        log_action("eval_question.delete", "eval_question", question_id,
+                   entity_label=label,
+                   **extract_admin_context(request, ctx))
     finally:
         db.close()
 
 
-@router.put("/prebunking-questions/{question_id}")
-async def update_prebunking_question(
-    question_id:   int,
-    body:          PrebunkingQuestionUpdate,
-    request:       Request = None,
-    authorization: str     = Header(None),
-):
-    """Edit an existing prebunking question, including image_url."""
-    _require_admin(authorization, request)
-    db = Session(engine)
-    try:
-        existing = db.execute(
-            sa.text("SELECT id FROM prebunking_questions WHERE id = :id"), {"id": question_id}
-        ).fetchone()
-        if not existing:
-            raise HTTPException(status_code=404, detail="Prebunking question not found.")
-        valid = _get_valid_technique_ids(db)
-        if body.technique_id and valid and body.technique_id not in valid:
-            raise HTTPException(status_code=422, detail="Invalid technique_id.")
-        if body.correct_answer and body.correct_answer.upper() not in _VALID_ANSWERS:
-            raise HTTPException(status_code=422, detail="correct_answer must be A, B, C, or D.")
-
-        fields, params = [], {"id": question_id, "now": datetime.now(timezone.utc)}
-        for col, val in [
-            ("technique_id",  body.technique_id),
-            ("question_text", body.question_text),
-            ("option_a",      body.option_a),
-            ("option_b",      body.option_b),
-            ("option_c",      body.option_c),
-            ("option_d",      body.option_d),
-            ("explanation",   body.explanation),
-            ("image_url",     body.image_url),
-            ("video_url",     body.video_url),
-            ("media_type",    body.media_type),
-        ]:
-            if val is not None:
-                fields.append(f"{col} = :{col}"); params[col] = val
-        if body.correct_answer is not None:
-            fields.append("correct_answer = :correct_answer")
-            params["correct_answer"] = body.correct_answer.upper()
-        fields.append("updated_at = :now")
-
-        if len(fields) == 1:
-            return {"detail": "Nothing to update."}
-
-        db.execute(sa.text(
-            f"UPDATE prebunking_questions SET {', '.join(fields)} WHERE id = :id"
-        ), params)
-        db.commit()
-        row = db.execute(sa.text(
-            "SELECT * FROM prebunking_questions WHERE id = :id"
-        ), {"id": question_id}).fetchone()
-        return dict(row._mapping)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        db.close()
-
-
-@router.delete("/prebunking-questions/{question_id}", status_code=204)
-async def delete_prebunking_question(
-    question_id:   int,
-    request:       Request = None,
-    authorization: str     = Header(None),
-):
-    """Delete a prebunking question."""
-    _require_admin(authorization, request)
-    db = Session(engine)
-    try:
-        existing = db.execute(
-            sa.text("SELECT id FROM prebunking_questions WHERE id = :id"), {"id": question_id}
-        ).fetchone()
-        if not existing:
-            raise HTTPException(status_code=404, detail="Prebunking question not found.")
-        db.execute(sa.text("DELETE FROM prebunking_questions WHERE id = :id"), {"id": question_id})
-        db.commit()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        db.close()
-
-
-
-@router.post("/corpus/ingest")
-async def corpus_ingest(
-    req:           CorpusIngestRequest,
-    request:       Request = None,
-    authorization: str     = Header(None),
-):
-    """Save manually curated sentences to corpus.db."""
-    _require_admin(authorization, request)
-    if not req.sentences:
-        raise HTTPException(status_code=422, detail="No sentences provided.")
-    rep = max(0.0, min(1.0, req.reputation))
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if not _CORPUS_DB.exists():
-        _CORPUS_DB.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        con = sqlite3.connect(str(_CORPUS_DB))
-        cur = con.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS sentences (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                text          TEXT    NOT NULL,
-                source_domain TEXT,
-                source_name   TEXT,
-                url           TEXT,
-                pipeline      TEXT,
-                reputation    REAL,
-                date_added    TEXT
-            )
-        """)
-        inserted = skipped = 0
-        for text in req.sentences:
-            text = text.strip()
-            if not text:
-                continue
-            if cur.execute("SELECT 1 FROM sentences WHERE text = ? LIMIT 1", (text,)).fetchone():
-                skipped += 1
-                continue
-            cur.execute(
-                "INSERT INTO sentences (text, source_domain, source_name, url, pipeline, reputation, date_added) VALUES (?,?,?,?,?,?,?)",
-                (text, req.source_domain, req.source_name, req.url or "", req.pipeline, rep, now),
-            )
-            inserted += 1
-        con.commit()
-        con.close()
-        return {"inserted": inserted, "skipped": skipped, "source_domain": req.source_domain}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"corpus.db write failed: {exc}")
-
+# ══════════════════════════════════════════════════════════════════════════════
+# CORPUS MANAGEMENT
+# ══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/corpus/stats")
-async def corpus_stats(request: Request, authorization: str = Header(None)):
-    """Return summary of corpus.db contents."""
+async def get_corpus_stats(request: Request, authorization: str = Header(None)):
+    """
+    Return basic statistics about the SQLite corpus used for evidence retrieval.
+    Reads from corpus.db (relative to project root) via sqlite3.
+    """
     _require_admin(authorization, request)
-    if not _CORPUS_DB.exists():
-        return {"total_sentences": 0, "sources": 0, "pipelines": ""}
-    try:
-        con = sqlite3.connect(str(_CORPUS_DB))
-        cur = con.cursor()
-        total   = cur.execute("SELECT COUNT(*) FROM sentences").fetchone()[0]
-        sources = cur.execute("SELECT COUNT(DISTINCT source_domain) FROM sentences").fetchone()[0]
-        pip_rows = cur.execute("SELECT pipeline, COUNT(*) AS n FROM sentences GROUP BY pipeline ORDER BY n DESC").fetchall()
-        con.close()
+
+    corpus_paths = [
+        _CORPUS_DB,                                          # routers/data/corpus.db
+        Path(__file__).resolve().parent.parent / "corpus.db",  # project root
+        Path(__file__).resolve().parent.parent / "data" / "corpus.db",
+    ]
+    db_path = next((p for p in corpus_paths if p.exists()), None)
+
+    if db_path is None:
         return {
-            "total_sentences": total,
-            "sources":         sources,
-            "pipelines":       " · ".join(f"{p}:{n}" for p, n in pip_rows) if pip_rows else "",
+            "sentence_count": 0,
+            "source_count":   0,
+            "pipelines":      [],
+            "size_mb":        0,
+            "db_path":        None,
+            "message":        "corpus.db not found — ingest sentences to create it.",
+        }
+
+    try:
+        con = sqlite3.connect(str(db_path))
+        cur = con.cursor()
+
+        sentence_count = cur.execute("SELECT COUNT(*) FROM corpus").fetchone()[0]
+        try:
+            source_count = cur.execute(
+                "SELECT COUNT(DISTINCT source_domain) FROM corpus"
+            ).fetchone()[0]
+        except Exception:
+            source_count = 0
+
+        try:
+            pipeline_rows = cur.execute(
+                "SELECT DISTINCT pipeline FROM corpus ORDER BY pipeline"
+            ).fetchall()
+            pipelines = [r[0] for r in pipeline_rows if r[0]]
+        except Exception:
+            pipelines = []
+
+        con.close()
+        size_mb = round(db_path.stat().st_size / (1024 * 1024), 2)
+
+        return {
+            "sentence_count": sentence_count,
+            "source_count":   source_count,
+            "pipelines":      pipelines,
+            "size_mb":        size_mb,
+            "db_path":        str(db_path),
         }
     except Exception as exc:
-        return {"total_sentences": 0, "sources": 0, "pipelines": "", "error": str(exc)}
+        logger.warning(f"[corpus/stats] error: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not read corpus.db: {exc}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# API & DATA HEALTH
-# ══════════════════════════════════════════════════════════════════════════════
-
-@router.get("/api-usage")
-async def get_api_usage(request: Request, authorization: str = Header(None)):
-    """Factcheck cache stats, MBFC coverage, system accuracy vs ground truth."""
+@router.post("/corpus/ingest", status_code=201)
+async def ingest_corpus(
+    body:          dict,
+    request:       Request,
+    authorization: str = Header(None),
+):
+    """
+    Save curated sentences to the SQLite corpus used for evidence retrieval.
+    body: {sentences: list[str], source_domain: str, source_name: str, pipeline: str}
+    Creates corpus.db if it doesn't exist.
+    """
     _require_admin(authorization, request)
-    db = Session(engine)
+
+    sentences     = body.get("sentences") or []
+    source_domain = (body.get("source_domain") or "").strip()
+    source_name   = (body.get("source_name") or source_domain).strip()
+    pipeline      = (body.get("pipeline") or "manual").strip()
+
+    if not sentences:
+        raise HTTPException(status_code=422, detail="sentences list is required and must not be empty.")
+    if not source_domain:
+        raise HTTPException(status_code=422, detail="source_domain is required.")
+
+    # Prefer the project-root corpus.db; create it if missing
+    db_path = Path(__file__).resolve().parent.parent / "corpus.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
-        factcheck_stats = {"total_cached": 0, "expired": 0, "active": 0}
-        try:
-            fc = db.execute(sa.text("""
-                SELECT
-                    COUNT(*)                                              AS total_cached,
-                    SUM(CASE WHEN expires_at < NOW() THEN 1 ELSE 0 END)  AS expired,
-                    SUM(CASE WHEN expires_at >= NOW() THEN 1 ELSE 0 END) AS active
-                FROM factcheck_cache
-            """)).fetchone()
-            if fc:
-                factcheck_stats = {
-                    "total_cached": fc.total_cached or 0,
-                    "expired":      fc.expired or 0,
-                    "active":       fc.active or 0,
-                }
-        except Exception as e:
-            factcheck_stats["error"] = str(e)
-
-        mbfc_stats = {"total_domains": 0, "last_synced": None}
-        try:
-            mbfc = db.execute(sa.text("""
-                SELECT COUNT(*) AS total, MAX(last_synced) AS last_synced FROM mbfc_domains
-            """)).fetchone()
-            mbfc_stats = {
-                "total_domains": mbfc.total or 0,
-                "last_synced":   str(mbfc.last_synced) if mbfc and mbfc.last_synced else None,
-                "note":          "Run sync from dashboard or: python scripts/sync_mbfc.py",
-            }
-        except Exception as e:
-            mbfc_stats["error"] = str(e)
-
-        system_accuracy = _compute_system_accuracy()
+        con = sqlite3.connect(str(db_path))
+        cur = con.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS corpus (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                sentence      TEXT    NOT NULL,
+                source_domain TEXT,
+                source_name   TEXT,
+                pipeline      TEXT,
+                created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        clean = [s.strip() for s in sentences if isinstance(s, str) and s.strip()]
+        cur.executemany(
+            "INSERT INTO corpus (sentence, source_domain, source_name, pipeline) VALUES (?,?,?,?)",
+            [(s, source_domain, source_name, pipeline) for s in clean],
+        )
+        con.commit()
+        inserted = cur.rowcount
+        con.close()
 
         return {
-            "google_factcheck_api": factcheck_stats,
-            "mbfc_coverage":        mbfc_stats,
-            "system_accuracy":      system_accuracy,
+            "inserted":      inserted,
+            "source_domain": source_domain,
+            "pipeline":      pipeline,
+            "db_path":       str(db_path),
+        }
+    except Exception as exc:
+        logger.error(f"[corpus/ingest] error: {exc}")
+        raise HTTPException(status_code=500, detail=f"Corpus ingest failed: {exc}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUDIT LOG
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/audit-log")
+async def get_audit_log(
+    request: Request,
+    authorization: str = Header(None),
+    page: int = 1,
+    per_page: int = 50,
+    search: str = "",
+    action: str = "",
+    resource_type: str = "",
+    resource: str = "",
+):
+    _require_admin(authorization, request)
+    per_page = max(10, min(per_page, 200))
+    offset = (page - 1) * per_page
+
+    # Support both ?resource_type= and ?resource= for the filter
+    effective_resource = resource or resource_type
+
+    # Build dynamic WHERE clause
+    conditions = []
+    params: dict = {"limit": per_page, "offset": offset}
+
+    if search:
+        conditions.append(
+            "(admin_username LIKE :search OR resource_id LIKE :search OR detail LIKE :search)"
+        )
+        params["search"] = f"%{search}%"
+    if action:
+        conditions.append("action = :action")
+        params["action"] = action
+    if effective_resource:
+        conditions.append("resource_type = :resource_type")
+        params["resource_type"] = effective_resource
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    db = Session(engine)
+    try:
+        rows = db.execute(sa.text(
+            f"SELECT id, admin_id, admin_username, action, resource_type, resource_id, detail, ip_address, performed_at "
+            f"FROM admin_audit_log {where} ORDER BY performed_at DESC LIMIT :limit OFFSET :offset"
+        ), params).fetchall()
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        total = db.execute(sa.text(
+            f"SELECT COUNT(*) FROM admin_audit_log {where}"
+        ), count_params).scalar()
+        resource_types = [r[0] for r in db.execute(sa.text(
+            "SELECT DISTINCT resource_type FROM admin_audit_log ORDER BY resource_type"
+        )).fetchall()]
+        return {
+            "rows": [dict(r._mapping) for r in rows],
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "resource_types": resource_types,
         }
     finally:
         db.close()
 
 
-@router.post("/mbfc/sync")
-async def trigger_mbfc_sync(request: Request, authorization: str = Header(None)):
-    """Trigger MBFC domain sync by running scripts/sync_mbfc.py."""
-    _require_admin(authorization, request)
-    sync_script = Path(__file__).resolve().parent / "scripts" / "sync_mbfc.py"
-    if not sync_script.exists():
-        raise HTTPException(status_code=404, detail="sync_mbfc.py not found.")
-    try:
-        result = subprocess.run(
-            [sys.executable, str(sync_script)],
-            capture_output=True, text=True, timeout=120
-        )
-        if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Sync failed: {result.stderr[:500]}")
-        return {"status": "ok", "output": result.stdout[:1000]}
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Sync timed out after 120s.")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+# ── Quiz Settings ─────────────────────────────────────────────────────────────
 
+class QuizSettingsPatch(BaseModel):
+    questions_per_session: int = Field(..., ge=1, le=50)
 
-def _compute_system_accuracy() -> dict:
-    """System accuracy against LIAR/FEVER ground truth from corpus.db."""
-    try:
-        db_path = Path(__file__).parent / "data" / "corpus.db"
-        if not db_path.exists():
-            return {"error": "corpus.db not found", "total": 0}
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='system_predictions'")
-        if not c.fetchone():
-            conn.close()
-            return {"error": "Run: python corpus/evaluate_system.py", "total": 0}
-        c.execute("""
-            SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN predicted_label = ground_truth_label THEN 1 END) AS correct,
-                   dataset
-            FROM system_predictions GROUP BY dataset
-        """)
-        rows = [dict(r) for r in c.fetchall()]
-        conn.close()
-        overall_total   = sum(r["total"] for r in rows)
-        overall_correct = sum(r["correct"] or 0 for r in rows)
-        return {
-            "overall_accuracy_pct": round(overall_correct / overall_total * 100, 1) if overall_total > 0 else None,
-            "total":      overall_total,
-            "correct":    overall_correct,
-            "by_dataset": rows,
-        }
-    except Exception as e:
-        return {"error": str(e), "total": 0}
+@router.get("/quiz/settings")
+async def admin_get_quiz_settings(req: Request, authorization: str = Header(None)):
+    """Return current quiz settings."""
+    from config import QUIZ_QUESTIONS_PER_SESSION
+    _require_admin(authorization, req)
+    return {"questions_per_session": QUIZ_QUESTIONS_PER_SESSION}
+
+@router.patch("/quiz/settings")
+async def admin_patch_quiz_settings(body: QuizSettingsPatch, req: Request, authorization: str = Header(None)):
+    """Update QUIZ_QUESTIONS_PER_SESSION in .env and reload config."""
+    _require_admin(authorization, req)
+    env_path = Path(".env")
+    key = "QUIZ_QUESTIONS_PER_SESSION"
+    new_val = str(body.questions_per_session)
+
+    if env_path.exists():
+        lines = env_path.read_text().splitlines(keepends=True)
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                lines[i] = f"{key}={new_val}\n"
+                found = True
+                break
+        if not found:
+            lines.append(f"{key}={new_val}\n")
+        env_path.write_text("".join(lines))
+    else:
+        env_path.write_text(f"{key}={new_val}\n")
+
+    # Update the live value in config module
+    import config as _cfg
+    _cfg.QUIZ_QUESTIONS_PER_SESSION = body.questions_per_session
+    # Also update quiz router's imported copy
+    import routers.quiz as _qr
+    _qr.QUIZ_QUESTIONS_PER_SESSION = body.questions_per_session
+
+    logger.info(f"[Admin] quiz questions_per_session updated to {new_val}")
+    return {"questions_per_session": body.questions_per_session, "message": "Updated successfully."}

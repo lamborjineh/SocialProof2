@@ -1,12 +1,5 @@
 """
-corpus/db.py  — quality gate added to insert_pipeline_sentences (v3.2)
-
-Change summary (v3.2):
-  - insert_pipeline_sentences now runs every sentence through
-    _sentence_quality_gate() before INSERT.
-    Rejects: too short, too few words, questions, boilerplate, fragments.
-    Factcheck pipeline applies a stricter factual-marker check.
-  - All other functions are unchanged from v3.1.
+corpus/db.py
 """
 
 import re

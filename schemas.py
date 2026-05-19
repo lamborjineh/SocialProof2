@@ -1,26 +1,17 @@
 """
-SocialProof — Pydantic Schemas  v4.1
-All API request/response models in one place.
+SocialProof — Pydantic Schemas  v6.0
 
-v4.0 Changes vs v3.1:
-  - Added FactCheckResult — Google Fact Check Tools API result item
-  - SourceStepResponse extended: factcheck_results
-
-v4.0 note: evaluation_id fields renamed to submission_id;
-  EvidenceResult.similarity_score removed (pipeline-internal only);
-  UserEvaluationRequest/Response and ReEvaluationRequest kept for backward
-  compatibility with existing router code but evaluation_id → submission_id.
-
-v3.0 Changes vs v2:
-  - input_type: added 'pdf' to the enum alongside text | url | image
-  - Added MBFCRating        — domain credibility signal from mbfc_domains table
-  - Added SourceStepResponse — extended Source node payload carrying mbfc field
-  - Added QuizAttemptResponse, PretestSubmitRequest, PretestResultResponse
-    (were being returned as raw dicts from quiz router — now typed)
-  - Added LessonCompletionRequest, LessonCompletionResponse
-  - AnalyzeRequest: image_data stays Optional[str] (base64); pdf_data added
-    alongside it using the same pattern
-  - All existing schemas preserved exactly
+Changes in v6.0 vs v5.0:
+  - ArticleResult gains:
+      mbfc_url, mbfc_factual, mbfc_bias  — MBFC badge fields (link + context, not verdict)
+      source_category                    — "government" | "academic" | "news" | "factcheck" | "international" | "other"
+      retrieval_reason                   — short human-readable explanation of why this article was retrieved
+  - ArticleRetrievalResponse gains:
+      source_diversity                   — SourceDiversityInfo breakdown shown to user
+  - ConfidenceSnapshot schema added      — for before/after confidence capture
+  - ReasoningJournalEntry schema added   — for Reasoning Journal POST
+  - SourceDiversityInfo schema added     — shown under evidence cards
+  - All auth, quiz, pretest, lesson schemas unchanged.
 """
 
 from typing import Optional, List, Dict, Any
@@ -30,155 +21,212 @@ from pydantic import BaseModel, Field, EmailStr, field_validator
 # ── Analysis — Request ────────────────────────────────────────────────────────
 
 class AnalyzeRequest(BaseModel):
-    text:          Optional[str] = Field(None, description="Raw text content")
-    url:           Optional[str] = Field(None, description="URL to analyze")
-    input_type:    str           = Field("text", description="text | url | image | file")
-    session_token: str           = Field(..., description="Anonymous session token")
-    user_id:       Optional[int] = Field(None, description="Authenticated user ID")
-    # image input — base64-encoded, decoded with base64.b64decode() in the router
-    image_data:    Optional[str] = Field(
-        None,
-        description="Base64-encoded image string (input_type=image)."
-    )
-    # unified file input — base64-encoded bytes for pdf/docx/pptx/html/txt/json
-    file_data:     Optional[str] = Field(
-        None,
-        description="Base64-encoded file bytes (input_type=file). "
-                    "Supports .pdf .docx .pptx .html .txt .json — "
-                    "format detected from file_name extension server-side."
-    )
-    file_name:     Optional[str] = Field(
-        None,
-        description="Original filename including extension (e.g. 'report.docx'). "
-                    "Required when input_type=file so the server can detect format."
-    )
+    text:               Optional[str] = Field(None, description="Raw text content")
+    url:                Optional[str] = Field(None, description="URL to analyze")
+    input_type:         str           = Field("text", description="text | url | image | file")
+    session_token:      str           = Field(..., description="Anonymous session token")
+    user_id:            Optional[int] = Field(None, description="Authenticated user ID")
+    image_data:         Optional[str] = Field(None, description="Base64-encoded image (input_type=image)")
+    file_data:          Optional[str] = Field(None, description="Base64-encoded file bytes (input_type=file)")
+    file_name:          Optional[str] = Field(None, description="Original filename including extension")
+    confidence_before:  Optional[int] = Field(None, description="User confidence before retrieval (1-5)")
 
 
-class UserClaimRequest(BaseModel):
+# ── Source diversity breakdown ────────────────────────────────────────────────
+
+class SourceDiversityInfo(BaseModel):
     """
-    When the system detects no claims, the user can type their own.
-    Re-runs the full pipeline on the user-supplied claim text,
-    stored as a child of the original submission.
+    Source-type composition of the retrieved articles.
+    Surfaced to the user to teach information ecosystem awareness
+    (UNESCO MIL competency: 'Access and Evaluate').
     """
-    submission_id: int
-    claim_text:    str = Field(..., min_length=10, description="User-typed claim to verify")
-    session_token: str
-    user_id:       Optional[int] = None
+    total_articles:      int  = 0
+    count_government:    int  = 0
+    count_academic:      int  = 0
+    count_news:          int  = 0
+    count_factcheck:     int  = 0
+    count_international: int  = 0
+    count_other:         int  = 0
+    diversity_score:     float = 0.0   # 0.0–1.0; higher = more varied
 
 
-class ValidateClaimRequest(BaseModel):
+# ── Article result (one item returned from retrieval) ─────────────────────────
+
+class ArticleResult(BaseModel):
     """
-    Ask Ollama whether a user-typed string is a checkable factual claim.
-    Returns {is_claim: bool, reason: str}.
+    A single retrieved article surfaced for the user to evaluate.
+    No NLI label, no type (support/contradict/neutral), no verdict.
+
+    v6.0 additions:
+      mbfc_url, mbfc_factual, mbfc_bias — MBFC badge (link + label as context)
+      source_category                   — used for source diversity breakdown
+      retrieval_reason                  — "Why was this retrieved?" explainability chip
     """
-    claim_text:    str = Field(..., min_length=3, description="User-typed text to validate")
-    submission_id: int
-    session_token: str = Field(..., description="Valid session token from GET /auth/session")
+    article_title:   str
+    publisher:       str
+    date_published:  Optional[str] = None
+    source_url:      Optional[str] = None
+    source_type:     Optional[str] = None    # "faiss" | "live" | "hardcoded"
 
+    # MBFC fields — shown as a badge with link; never as a verdict
+    mbfc_url:        Optional[str] = None    # direct link to MBFC page for this domain
+    mbfc_factual:    Optional[str] = None    # e.g. "HIGH" | "MOSTLY FACTUAL" | "MIXED" | "LOW"
+    mbfc_bias:       Optional[str] = None    # e.g. "LEFT-CENTER" | "CENTER" | "RIGHT"
 
-# ── Analysis — Sub-models ─────────────────────────────────────────────────────
+    # Source type for diversity panel
+    source_category: Optional[str] = None   # "government" | "academic" | "news" | "factcheck" | "international" | "other"
 
-class ClaimResult(BaseModel):
-    text:             str
-    sentence_index:   int
-    label:            str
-    confidence:       float
-    evidence_found:   bool          = False
-    check_worthiness: Optional[float] = None
-
-
-class EvidenceResult(BaseModel):
-    evidence_text:    str
-    type:             str
-    source_label:     str
-    source_url:       Optional[str]   = None
-    article_title:    Optional[str]   = None
-    publisher:        Optional[str]   = None
-    date_published:   Optional[str]   = None
-    claim_text:       str
-    nli_confidence:   Optional[float] = None
-    source_type:      Optional[str]   = None   # faiss | live | hardcoded
-
-
-class AnnotationSegment(BaseModel):
-    text:   str
-    type:   str
-    status: Optional[str] = None
+    # Retrieval explainability — one short phrase shown under the card
+    retrieval_reason: Optional[str] = None  # e.g. "Matched: election fraud claims"
 
 
 # ── Analysis — Response ───────────────────────────────────────────────────────
 
-class AnalyzeResponse(BaseModel):
+class ArticleRetrievalResponse(BaseModel):
+    """
+    Returned from POST /analyze.
+    Contains retrieved articles for the user to evaluate — no verdict from the system.
+    """
     submission_id:      int
-    evaluation_id:      Optional[int] = None  # alias for submission_id — kept for frontend compatibility
-    score:              int = 0               # credibility score 0–100; was silently dropped (Bug fix)
-    label:              str
-    explanation:        str
-    explanation_source: str = "rule_based"
-    claims:             List[ClaimResult]
-    evidence:           List[EvidenceResult]
-    annotated:          List[AnnotationSegment]
-    source_score:       float
-    bias_score:         float
-    sub_scores:         Dict[str, Any]
+    evaluation_id:      Optional[int]         = None
+    articles:           List[ArticleResult]
+    keywords:           List[str]             = Field(default_factory=list)
     processing_ms:      int
-    is_partial:                  bool  = False
-    is_inconclusive:             bool  = False
-    no_claims_detected:          bool  = False
-    live_search_used:            bool  = False
-    evidence_coverage:           float = 1.0
-    unverified_claims:           List[str] = Field(default_factory=list)
-    suggest_secondary_retrieval: bool  = False
-    mil_tip:                     str   = ""
-    mil_tip_source:              str   = "rule_based"
-    all_evidence_neutral:        bool  = False
-    evidence_quality_note:       str   = ""
-    url_fetch_failed:            bool  = False
-    url_fetch_error:             str   = ""
+    live_search_used:   bool                  = False
+    url_fetch_failed:   bool                  = False
+    url_fetch_error:    str                   = ""
+    source_diversity:   Optional[SourceDiversityInfo] = None
 
 
-# ── Source node — v3 extended response ───────────────────────────────────────
-
-class FactCheckResult(BaseModel):
-    """
-    One result from the Google Fact Check Tools API.
-    Surfaced in the Source node as clickable review links — never as a verdict.
-    """
-    publisher:      str
-    url:            str
-    textual_rating: str
-    claim_date:     Optional[str] = None
-
+# ── MBFC domain signal — link only, not verdict ───────────────────────────────
 
 class MBFCRating(BaseModel):
-    """
-    Domain credibility signal from the mbfc_domains table (iffy.news export).
-    Surfaced in the Source node as context — never as a verdict.
-    The frontend displays this alongside other source signals so the user
-    can draw their own conclusions.
-    """
-    domain:            str
-    factual_reporting: Optional[str] = None   # HIGH / MOSTLY_FACTUAL / MIXED / LOW / VERY_LOW
-    bias_rating:       Optional[str] = None   # LEFT-CENTER / CENTER / RIGHT / etc.
-    credibility_rating: Optional[str] = None
-    country:           Optional[str] = None
+    domain:   str
+    mbfc_url: Optional[str] = None
 
+
+# ── Source step — on-demand domain lookup (no verdict) ───────────────────────
 
 class SourceStepResponse(BaseModel):
-    """
-    Returned when the Source node is triggered (on-demand, not on submission).
-    v3 extends v2 with MBFC domain signal, Google Fact Check results, and
-    """
-    domain:            str
-    source_type:       str
-    trust_signals:     List[str]
-    source_score:      float
-    source_label:      str
-    mbfc:              Optional[MBFCRating]         = None   # None if domain not in MBFC dataset
-    factcheck_results: List[FactCheckResult]        = Field(default_factory=list)  # Google Fact Check API
+    domain:       str
+    source_type:  str
+    trust_signals: List[str]
+    mbfc:         Optional[MBFCRating] = None
 
 
-# ── User Evaluation ───────────────────────────────────────────────────────────
+# ── NEW v6.0: Reasoning Journal (Bloom's L4–5 reflection) ────────────────────
+
+class ReasoningJournalEntry(BaseModel):
+    """
+    Posted by the frontend at three stages of the evaluation flow.
+
+    stage values:
+      'post_eval'      — after completing the 8-step evaluation
+      'post_evidence'  — after the user has read the retrieved articles
+      'post_verdict'   — after the user submits their final verdict
+
+    bloom_level is computed by the frontend based on which prompts the user
+    answered and how thoroughly (word count heuristic). Range 1–5.
+    """
+    submission_id:    Optional[int] = None
+    user_id:          Optional[int] = None
+    session_token:    str
+    stage:            str           = "post_verdict"   # post_eval | post_evidence | post_verdict
+    what_noticed:     Optional[str] = None
+    still_uncertain:  Optional[str] = None
+    would_check_next: Optional[str] = None
+    free_reasoning:   Optional[str] = None
+    verdict_position: Optional[str] = None
+    bloom_level:      Optional[int] = None
+
+
+class ReasoningJournalResponse(BaseModel):
+    id:          int
+    stage:       str
+    bloom_level: Optional[int]
+    saved:       bool = True
+
+
+# ── NEW v7.0: Metacognitive Calibration Challenge Gate ────────────────────────
+
+class ChallengeGateRequest(BaseModel):
+    """
+    Posted by the frontend BEFORE the verdict submit button fires.
+    The backend evaluates the user's reasoning quality signals and decides
+    whether to let them through (gate=pass) or issue a Socratic challenge.
+
+    challenge_round: 0 on first call; 1 after the user responds to the first
+    challenge; 2 after the second. On round >= 2 the gate always passes to
+    prevent frustration loops.
+
+    challenge_response: the user's typed reply to the previous challenge prompt.
+    Empty on round 0.
+    """
+    submission_id:       Optional[int] = None
+    user_id:             Optional[int] = None
+    session_token:       str
+
+    # Reasoning quality signals (mirrors user-evaluation inputs)
+    bloom_level:         Optional[int]   = None    # 1–5 from Reasoning Journal
+    calibration_gap:     Optional[float] = None    # from /user-evaluation response
+    skipped_steps:       Optional[List[str]] = Field(default_factory=list)
+    confidence_level:    Optional[str]   = None    # "high" | "medium" | "low"
+    word_count:          Optional[int]   = None    # total words in reflection
+    verdict_position:    Optional[str]   = None    # "supported" | "unsupported" | "uncertain"
+
+    # Challenge loop state
+    challenge_round:     int             = 0
+    challenge_response:  Optional[str]   = None    # user's reply to prior challenge
+
+
+class ChallengeGateResponse(BaseModel):
+    """
+    gate="pass"      → frontend enables the Submit Verdict button
+    gate="challenge" → frontend shows challenge_prompt and blocks submission
+
+    challenge_type values:
+      "inoculation"   — Inoculation Theory: pre-bunk a detected reasoning pattern
+      "slow_down"     — Dual Process: force System 2 engagement with a specific question
+      "bloom_upgrade" — Bloom's: reject L1/L2 reasoning, ask for L3+ response
+
+    min_words: minimum word count the user's challenge_response must reach
+               before the gate will pass on the next round.
+    """
+    gate:             str                    # "pass" | "challenge"
+    challenge_type:   Optional[str]  = None  # "inoculation" | "slow_down" | "bloom_upgrade"
+    challenge_prompt: Optional[str]  = None  # The Socratic question shown to the user
+    context_note:     Optional[str]  = None  # Why this challenge is being issued (shown subtly)
+    min_words:        int            = 15
+    round:            int            = 0
+    framework_label:  Optional[str]  = None  # "Inoculation Theory" | "Dual Process" | "Bloom's Taxonomy"
+
+
+# ── NEW v6.0: Confidence Snapshot ────────────────────────────────────────────
+
+class ConfidenceSnapshotRequest(BaseModel):
+    """
+    Captures confidence_before (at the start of a session) or
+    confidence_after (after reviewing evidence), or both.
+    Posted from the frontend at Step 1 (before retrieval) and again after
+    the user reads the evidence cards.
+    """
+    submission_id:      Optional[int] = None
+    user_id:            Optional[int] = None
+    session_token:      str
+    confidence_before:  Optional[int] = None    # 1–5
+    confidence_after:   Optional[int] = None    # 1–5
+    confidence_label:   Optional[str] = None    # "high" | "medium" | "low" (from step eval)
+
+
+class ConfidenceSnapshotResponse(BaseModel):
+    id:                int
+    confidence_before: Optional[int]
+    confidence_after:  Optional[int]
+    confidence_delta:  Optional[int]
+    calibration_flag:  bool = False
+
+
+# ── User Evaluation (self-assessment) ─────────────────────────────────────────
 
 class UserEvaluationRequest(BaseModel):
     submission_id:     int
@@ -188,15 +236,20 @@ class UserEvaluationRequest(BaseModel):
     source_credible:   Optional[str]       = None
     bias_detected:     Optional[bool]      = None
     evidence_assessed: Optional[bool]      = None
-    user_score:        Optional[int]       = Field(None, ge=0, le=100)
-    user_label:        Optional[str]       = None
     confidence_level:  Optional[str]       = None
     skipped_steps:     Optional[List[str]] = Field(default_factory=list)
+    time_spent_seconds: Optional[int]      = None
+    # v6.0: confidence before/after forwarded through user-evaluation
+    confidence_before: Optional[int]       = None
+    confidence_after:  Optional[int]       = None
 
 
 class FeedbackItem(BaseModel):
-    type: str
+    type: str   # "good" | "warn" | "bad" | "calibration" | "missed" | "diversity"
     text: str
+    # Optional structured context for richer feedback display
+    step_name:   Optional[str] = None    # which step this feedback belongs to
+    learn_more:  Optional[str] = None    # lesson_key to link to
 
 
 class TriggeredLesson(BaseModel):
@@ -207,51 +260,42 @@ class TriggeredLesson(BaseModel):
 
 
 class ComparisonResult(BaseModel):
-    score_diff:       int
-    score_diff_label: str              # "Low" | "Moderate" | "High"
-    user_label:       Optional[str]
-    system_label:     str
-    label_match:      bool
-    missed_bias:      bool
-    missed_claims:    bool
-    source_mismatch:  bool
-    confidence_level: Optional[str]
-    triggered_lessons:    List[TriggeredLesson]
-    feedback_items:       List[FeedbackItem]
-    feedback_summary:     str
-    evidence_was_missing: bool = False
-    lesson_context_map:   Dict[str, str] = Field(default_factory=dict)
+    confidence_level:   Optional[str]
+    triggered_lessons:  List[TriggeredLesson]
+    feedback_items:     List[FeedbackItem]
+    feedback_summary:   str
+    lesson_context_map: Dict[str, str]         = Field(default_factory=dict)
+    calibration_gap:    Optional[float]        = None   # positive = overconfident
+    skill_deltas:       Optional[Dict[str, str]] = None  # topic → "improved" | "needs_work"
 
 
 class UserEvaluationResponse(BaseModel):
     submission_id: int
-    comparison:         ComparisonResult
-
-
-# ── Re-Evaluation ─────────────────────────────────────────────────────────────
-
-class ReEvaluationRequest(BaseModel):
-    submission_id: int
-    revised_score:      Optional[int] = Field(None, ge=0, le=100)
-    revised_label:      Optional[str] = None
-    revised_confidence: Optional[str] = None
-    revision_notes:     Optional[str] = None
-    revision_trigger:   Optional[str] = Field(
-        None,
-        description="system_feedback | own_research | community_review | lesson_learned"
-    )
+    comparison:    ComparisonResult
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
-    username: str      = Field(..., min_length=3, max_length=50)
-    email:    EmailStr = Field(..., description="Valid email address")
-    password: str      = Field(..., min_length=8)
+    username:          str      = Field(..., min_length=3, max_length=50)
+    email:             EmailStr = Field(..., description="Valid email address")
+    password:          str      = Field(..., min_length=8)
+    # ── Research consent (required before account creation) ───────────────────
+    # Must be True — the registration endpoint rejects False.
+    # Stored with a UTC timestamp for IRB audit compliance.
+    research_consent:  bool     = Field(
+        ...,
+        description=(
+            "Participant agrees to anonymised research use of their activity data. "
+            "Must be True to register."
+        ),
+    )
 
     @field_validator("password")
     @classmethod
     def password_complexity(cls, v: str) -> str:
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password must be 72 characters or fewer (bcrypt limit).")
         if not any(c.isupper() for c in v):
             raise ValueError("Password must contain at least one uppercase letter.")
         if not any(c.isdigit() for c in v):
@@ -259,6 +303,28 @@ class RegisterRequest(BaseModel):
         if not any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in v):
             raise ValueError("Password must contain at least one special character (!@#$%^&*...).")
         return v
+
+    @field_validator("research_consent")
+    @classmethod
+    def consent_must_be_given(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError(
+                "Research participation consent is required to create an account. "
+                "You may withdraw consent at any time after registration."
+            )
+        return v
+
+
+class ConsentWithdrawRequest(BaseModel):
+    """Posted to POST /auth/withdraw-consent by an authenticated user."""
+    user_id: int
+
+
+class ConsentStatusResponse(BaseModel):
+    user_id:              int
+    research_consent:     bool
+    research_consent_at:  Optional[str] = None   # ISO-8601 UTC
+    consent_withdrawn_at: Optional[str] = None   # ISO-8601 UTC; None = still active
 
 
 class LoginRequest(BaseModel):
@@ -278,27 +344,26 @@ class AuthResponse(BaseModel):
 class QuizAttemptRequest(BaseModel):
     user_id:        Optional[int] = None
     question_id:    int
-    selected_index: int
+    selected_index: int = Field(..., ge=0, le=9, description="Zero-based index of the chosen option (max 9)")
 
 
 class QuizAttemptResponse(BaseModel):
-    """Immediate feedback returned after a quiz attempt is recorded."""
     is_correct:        bool
     correct_index:     int
     explanation:       Optional[str] = None
+    hint:              Optional[str] = None
     topic:             str
     difficulty:        Optional[str] = None
-    # ── MIL skill layer (feature ⑨: "why this matters") ──────────────────────
-    skill_used:        Optional[str] = None   # internal key  e.g. "evidence_evaluation"
-    skill_label:       Optional[str] = None   # display name  e.g. "Evidence Evaluation"
-    skill_description: Optional[str] = None   # one-liner     e.g. "Judging whether sources actually prove what they claim"
+    skill_used:        Optional[str] = None
+    skill_label:       Optional[str] = None
+    skill_description: Optional[str] = None
 
 
 # ── Pretest / Posttest ────────────────────────────────────────────────────────
 
 class PretestAnswerItem(BaseModel):
     claim_id:       int
-    selected_label: str   # "supported" | "misleading" | "neutral" | "unverified"
+    selected_label: str
 
 
 class PretestSubmitRequest(BaseModel):
@@ -308,13 +373,12 @@ class PretestSubmitRequest(BaseModel):
 
 
 class PretestResultResponse(BaseModel):
-    phase:        str    # "pretest" | "posttest"
-    score_pct:    int
-    correct:      int
-    total:        int
-    # posttest only — None on pretest
-    delta:        Optional[int]   = None   # score_pct - pretest score_pct
-    skill_gains:  Optional[Dict[str, Any]] = None
+    phase:       str
+    score_pct:   int
+    correct:     int
+    total:       int
+    delta:       Optional[int]           = None
+    skill_gains: Optional[Dict[str, Any]] = None
 
 
 # ── Lessons ───────────────────────────────────────────────────────────────────
@@ -330,6 +394,7 @@ class LessonCompletionResponse(BaseModel):
     completed_at: str
     message:      str = "Lesson marked complete."
 
+
 # ── Auth — Password reset / Email verification ────────────────────────────────
 
 class ForgotPasswordRequest(BaseModel):
@@ -341,4 +406,3 @@ class ResetPasswordRequest(BaseModel):
 
 class VerifyEmailRequest(BaseModel):
     token: str = Field(..., min_length=10)
-

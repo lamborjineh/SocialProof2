@@ -28,17 +28,41 @@ function markInput(id, err) {
   if (el) el.classList.toggle('error', err);
 }
 
-// Validators
+// Username availability debounce
+let _usernameTimer = null;
+async function _checkUsernameAvailable(username) {
+  try {
+    const res = await fetch(`/auth/check-username?u=${encodeURIComponent(username)}`);
+    if (!res.ok) return; // silent fail — server will catch on submit
+    const data = await res.json();
+    const taken = !data.available;
+    markInput('reg-username', taken);
+    const errEl = document.getElementById('err-reg-username');
+    if (errEl) {
+      errEl.textContent = taken
+        ? 'That username is already taken. Please choose another.'
+        : 'Username must be 3–50 characters, letters/numbers/underscores only.';
+      errEl.classList.toggle('show', taken);
+    }
+  } catch (_) { /* network error — ignore, server validates on submit */ }
+}
+
 function validateUsername() {
   const v = document.getElementById('reg-username').value;
   const ok = /^[a-zA-Z0-9_]{3,50}$/.test(v);
   markInput('reg-username', !ok && v.length > 0);
   showErr('err-reg-username', !ok && v.length > 0);
+  // Debounced availability check (only when format is valid)
+  clearTimeout(_usernameTimer);
+  if (ok) {
+    _usernameTimer = setTimeout(() => _checkUsernameAvailable(v), 400);
+  }
   return ok;
 }
 function validateEmail() {
   const v = document.getElementById('reg-email').value;
-  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+  // Require: local-part, @, domain of ≥2 chars, dot, TLD of ≥2 chars; max 254 chars total
+  const ok = v.length <= 254 && /^[^\s@]{1,64}@[^\s@]{2,}\.[^\s@]{2,}$/.test(v);
   markInput('reg-email', !ok && v.length > 0);
   showErr('err-reg-email', !ok && v.length > 0);
   return ok;
@@ -166,13 +190,29 @@ async function submitRegister() {
   if (!validateUsername())  valid = false;
   if (!validateEmail())     valid = false;
   const pw = document.getElementById('reg-password').value;
-  const pwOk = pw.length >= 8 && /[A-Z]/.test(pw) && /[0-9]/.test(pw) && /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?]/.test(pw);
+  // bcrypt silently truncates at 72 bytes — enforce the cap client-side too
+  const pwLen = new TextEncoder().encode(pw).length;
+  const pwOk = pw.length >= 8 && pwLen <= 72 && /[A-Z]/.test(pw) && /[0-9]/.test(pw) && /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?]/.test(pw);
   if (!pwOk) {
+    const errEl = document.getElementById('err-reg-password');
+    if (errEl) errEl.textContent = pwLen > 72
+      ? 'Password must be 72 characters or fewer.'
+      : 'Password must be at least 8 characters with uppercase, number & special character.';
     markInput('reg-password', true); showErr('err-reg-password', true); valid = false;
   } else {
     markInput('reg-password', false); showErr('err-reg-password', false);
   }
   if (!validateConfirm()) valid = false;
+
+  // Research consent is required
+  const consentChecked = document.getElementById('research-consent')?.checked;
+  if (!consentChecked) {
+    showErr('err-research-consent', true);
+    valid = false;
+  } else {
+    showErr('err-research-consent', false);
+  }
+
   if (!valid) {
     document.getElementById('form-register').classList.add('shake');
     setTimeout(() => document.getElementById('form-register').classList.remove('shake'), 300);
@@ -187,9 +227,10 @@ async function submitRegister() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        username: document.getElementById('reg-username').value.trim(),
-        email:    document.getElementById('reg-email').value.trim(),
-        password: pw,
+        username:          document.getElementById('reg-username').value.trim(),
+        email:             document.getElementById('reg-email').value.trim(),
+        password:          pw,
+        research_consent:  true,   // checkbox already verified above
       }),
     });
 
@@ -259,7 +300,7 @@ async function submitRegister() {
 
 function submitForgot() {
   const email = document.getElementById('forgot-email').value;
-  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  const ok = /^[^\s@]{1,64}@[^\s@]{2,}\.[^\s@]{2,}$/.test(email);
   markInput('forgot-email', !ok);
   showErr('err-forgot-email', !ok);
   if (!ok) return;
@@ -275,12 +316,14 @@ function submitForgot() {
 (function checkAuth() {
   const username  = localStorage.getItem('sp_username');
   const role      = localStorage.getItem('sp_role');
-  const loginLink = document.getElementById('sidebar-login-link');
+  const loginLink  = document.getElementById('sidebar-login-link');
+  const loginLinkM = document.getElementById('sidebar-login-link-m');
 
-  if (username && loginLink) {
-    loginLink.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Logout`;
-    loginLink.onclick = (e) => { e.preventDefault(); ['sp_token','sp_user_id','sp_username','sp_role'].forEach(k=>localStorage.removeItem(k)); window.location.href='index.html'; };
-    loginLink.href = '#';
+  if (username) {
+    const logoutHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Logout`;
+    const doLogout = async (e) => { e.preventDefault(); await fetch('/auth/cookie-logout', { method: 'POST', credentials: 'include' }).catch(() => {}); localStorage.clear(); window.location.href = 'index.html'; };
+    if (loginLink)  { loginLink.innerHTML  = logoutHTML; loginLink.onclick  = doLogout; loginLink.href  = '#'; }
+    if (loginLinkM) { loginLinkM.innerHTML = logoutHTML; loginLinkM.onclick = doLogout; loginLinkM.href = '#'; }
   }
 
 })();
